@@ -1,0 +1,23 @@
+[project]
+name = "automate-pinterest"
+version = "2.0.0"
+description = "Python FastAPI + Browser-Use CDP automation engine for Pinterest & Facebook with React/TypeScript/MUI dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.8.0",
+    "reportlab>=4.2.0",
+    "openpyxl>=3.1.5",
+    "requests>=2.32.0",
+    "python-dotenv>=1.0.0",
+    "sse-starlette>=2.1.0",
+    "Pillow>=10.4.0",
+]
+
+[tool.vercel]
+entrypoint = "backend.main:app"
+
+[tool.vercel.fastapi.static]
+cdn = true

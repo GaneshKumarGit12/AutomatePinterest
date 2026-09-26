@@ -79,6 +79,7 @@ ALLOWED_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -510,7 +511,7 @@ async def sync_edge():
 async def get_reports():
     """Returns list of generated daily PDF activity reports."""
     ensure_report_directory(REPORT_DIR)
-    files = [f for f in os.listdir(REPORT_DIR) if f.endswith(".pdf")]
+    files = [f for f in os.listdir(REPORT_DIR) if f.endswith(".pdf")] if os.path.exists(REPORT_DIR) else []
     reports = []
     for f in files:
         full = os.path.join(REPORT_DIR, f)

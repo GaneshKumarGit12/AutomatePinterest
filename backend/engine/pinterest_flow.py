@@ -2,7 +2,12 @@ import os
 import asyncio
 import time
 from typing import Dict, Any, List, Callable, Optional
-from playwright.async_api import Page, BrowserContext
+
+try:
+    from playwright.async_api import Page, BrowserContext
+except ImportError:
+    Page = Any  # type: ignore
+    BrowserContext = Any  # type: ignore
 from backend.engine.browser_agent import (
     install_visual_cursor,
     visual_move_and_click,

@@ -1,5 +1,11 @@
 import asyncio
-from playwright.async_api import Page, BrowserContext
+from typing import Any
+
+try:
+    from playwright.async_api import Page, BrowserContext
+except ImportError:
+    Page = Any  # type: ignore
+    BrowserContext = Any  # type: ignore
 
 VISUAL_CURSOR_INJECTION = """
 (() => {

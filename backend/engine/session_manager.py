@@ -2,8 +2,14 @@ import os
 import shutil
 import subprocess
 import asyncio
-from typing import Optional
-from playwright.async_api import async_playwright, BrowserContext, Page
+from typing import Optional, Any
+
+try:
+    from playwright.async_api import async_playwright, BrowserContext, Page
+except ImportError:
+    async_playwright = None  # type: ignore
+    BrowserContext = Any  # type: ignore
+    Page = Any  # type: ignore
 
 USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "user_data", "automation_session"))
 

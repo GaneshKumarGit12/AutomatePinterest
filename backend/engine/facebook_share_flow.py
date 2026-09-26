@@ -23,7 +23,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from playwright.async_api import BrowserContext, Page
+try:
+    from playwright.async_api import BrowserContext, Page
+except ImportError:
+    BrowserContext = Any  # type: ignore
+    Page = Any  # type: ignore
+
 from backend.engine.session_manager import get_browser_context
 from backend.engine.social_manager import (
     DeduplicationLedger,
@@ -44,17 +49,21 @@ if hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding != "utf-8":
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_WRITABLE_ROOT = "/tmp" if os.environ.get("VERCEL") else PROJECT_ROOT
 PINTEREST_CREATED_URL = os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
 PINTEREST_SAVED_URL = os.environ.get("PINTEREST_SAVED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_saved/")
 FB_PAGE_NAME = os.environ.get("FACEBOOK_PAGE_NAME", "Worldnewzs")
 FB_PAGE_URL = os.environ.get("FACEBOOK_PAGE_URL", "https://www.facebook.com/profile.php?id=61589266599006")
 FB_GROUP_NAME = os.environ.get("FACEBOOK_GROUP_NAME", "Amazon Affiliate Group")
 FB_GROUP_URL = os.environ.get("FACEBOOK_GROUP_URL", "https://www.facebook.com/groups/1761596288324903/")
-DHANVI_PINS_CACHE = os.path.join(PROJECT_ROOT, "state", "dhanvi_pins_cache.json")
-TEMP_PIN_IMAGES_DIR = os.path.join(PROJECT_ROOT, "state", "temp_pin_images")
-SCREENSHOTS_DIR = os.path.join(PROJECT_ROOT, "state", "screenshots")
-os.makedirs(TEMP_PIN_IMAGES_DIR, exist_ok=True)
-os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+DHANVI_PINS_CACHE = os.path.join(_WRITABLE_ROOT, "state", "dhanvi_pins_cache.json")
+TEMP_PIN_IMAGES_DIR = os.path.join(_WRITABLE_ROOT, "state", "temp_pin_images")
+SCREENSHOTS_DIR = os.path.join(_WRITABLE_ROOT, "state", "screenshots")
+try:
+    os.makedirs(TEMP_PIN_IMAGES_DIR, exist_ok=True)
+    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+except OSError:
+    pass
 
 
 def resolve_pin_image_from_pinterest(pin_id: str, pin_url: str = "") -> str:

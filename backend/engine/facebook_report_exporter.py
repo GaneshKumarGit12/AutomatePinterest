@@ -27,11 +27,16 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-REPORT_DIR = os.environ.get("REPORT_OUTPUT_DIR") or r"C:\Downloads\AutomatePinterest"
+REPORT_DIR = os.environ.get("REPORT_OUTPUT_DIR") or (
+    "/tmp/AutomatePinterest" if os.environ.get("VERCEL") else r"C:\Downloads\AutomatePinterest"
+)
 
 
 def ensure_report_dir(path: str = REPORT_DIR) -> str:
-    os.makedirs(path, exist_ok=True)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        pass
     return path
 
 

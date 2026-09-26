@@ -53,9 +53,12 @@ def sync_live_products() -> Dict[str, Any]:
             if price and orig and float(orig) > float(price):
                 p["discount"] = f"{round((1 - float(price) / float(orig)) * 100)}% OFF"
 
-        os.makedirs(os.path.dirname(LOCAL_DATASET_PATH), exist_ok=True)
-        with open(LOCAL_DATASET_PATH, "w", encoding="utf-8") as f:
-            json.dump({"products": live_prods}, f, indent=2, ensure_ascii=False)
+        try:
+            os.makedirs(os.path.dirname(LOCAL_DATASET_PATH), exist_ok=True)
+            with open(LOCAL_DATASET_PATH, "w", encoding="utf-8") as f:
+                json.dump({"products": live_prods}, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
 
         _cached_products = live_prods
         print(f"[Scraper] Successfully synced {len(_cached_products)} products from WorldNewzs.")

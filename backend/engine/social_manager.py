@@ -8,7 +8,13 @@ import hashlib
 import random
 import urllib.parse
 from typing import Dict, Any, List, Optional, Callable
-from playwright.async_api import BrowserContext, Page
+
+try:
+    from playwright.async_api import BrowserContext, Page
+except ImportError:
+    BrowserContext = Any  # type: ignore
+    Page = Any  # type: ignore
+
 from backend.engine.session_manager import get_browser_context
 
 if hasattr(sys.stdout, 'reconfigure') and sys.stdout.encoding != 'utf-8':
@@ -27,7 +33,8 @@ def safe_print(msg: str):
         except Exception:
             pass
 
-STATE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "state"))
+_STATE_ROOT = "/tmp" if os.environ.get("VERCEL") else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+STATE_DIR = os.path.join(_STATE_ROOT, "state")
 HISTORY_FILE = os.path.join(STATE_DIR, "social_share_history.json")
 
 # Category hashtag pools
@@ -78,7 +85,10 @@ class DeduplicationLedger:
         self._load()
 
     def _load(self):
-        os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+        except OSError:
+            pass
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, "r", encoding="utf-8") as f:
