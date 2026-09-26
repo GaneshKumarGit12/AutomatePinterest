@@ -1,0 +1,31 @@
+{
+  "name": "automate-pinterest",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Python FastAPI + Browser-Use CDP automation engine for Pinterest & Facebook with React/TypeScript/MUI dashboard",
+  "type": "module",
+  "scripts": {
+    "start": ".\\venv\\Scripts\\uvicorn.exe backend.main:app --port 3001 --host 0.0.0.0",
+    "dev": ".\\venv\\Scripts\\uvicorn.exe backend.main:app --reload --port 3001 --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/icons-material": "^5.16.7",
+    "@mui/material": "^5.16.7",
+    "axios": "^1.8.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0"
+  }
+}
