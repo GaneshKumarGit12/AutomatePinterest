@@ -95,6 +95,17 @@ export const App: React.FC = () => {
       const data = await api.getStatus();
       if (data && data.runState) {
         setRunState((prev) => ({ ...prev, ...data.runState }));
+        if (Array.isArray(data.runState.stepLogs) && data.runState.stepLogs.length > 0) {
+          setStepLogs(data.runState.stepLogs);
+        }
+        if (
+          data.runState.lastCompletionData &&
+          (!completionData ||
+            (data.runState.lastCompletionData.runId &&
+              data.runState.lastCompletionData.runId !== (completionData as any).runId))
+        ) {
+          setCompletionData(data.runState.lastCompletionData);
+        }
       }
       setIsConnected(true);
     } catch {
@@ -169,14 +180,56 @@ export const App: React.FC = () => {
       .catch(() => {});
   }, [selectedPage]);
 
+  const applyStartRunResponse = (res: any, startPage: number, endPage: number) => {
+    const pageCount = endPage - startPage + 1;
+    if (res && res.completedInline) {
+      if (Array.isArray(res.stepLogs)) {
+        setStepLogs(res.stepLogs);
+      }
+      if (Array.isArray(res.liveLogs)) {
+        setLiveLogs((prev) => [...prev.slice(-300), ...res.liveLogs]);
+      }
+      setRunState((prev) => ({
+        ...prev,
+        isRunning: false,
+        currentPage: endPage,
+        startPage,
+        endPage,
+        selectedPages: pageCount,
+        totalCardsProcessed: Array.isArray(res.processedCards) ? res.processedCards.length : prev.totalCardsProcessed,
+        processedCards: Array.isArray(res.processedCards) ? res.processedCards : prev.processedCards,
+      }));
+      if (Array.isArray(res.shareUrls) && res.shareUrls.length > 0) {
+        window.open(res.shareUrls[0], '_blank');
+      }
+      if (res.completionData) {
+        setCompletionData(res.completionData);
+        setIsCompletionModalOpen(true);
+      }
+      setToast({
+        message: res.message || `Automate process between page ${startPage} to ${endPage} completed`,
+        severity: 'success',
+      });
+    } else {
+      setRunState((prev) => ({
+        ...prev,
+        isRunning: true,
+        currentPage: startPage,
+        startPage,
+        endPage,
+        selectedPages: pageCount,
+      }));
+    }
+  };
+
   const handleStartForPage = async (page: number) => {
     try {
       setToast({
         message: `Starting 11-step automation for Page ${page} (6 Deal Cards)...`,
         severity: 'info',
       });
-      await api.startRun({ startPage: page, pages: 1 });
-      setRunState((prev) => ({ ...prev, isRunning: true, currentPage: page, startPage: page, endPage: page }));
+      const res = await api.startRun({ startPage: page, pages: 1 });
+      applyStartRunResponse(res, page, page);
     } catch (err: any) {
       setToast({ message: `Failed to start: ${err.message}`, severity: 'error' });
     }
@@ -190,15 +243,8 @@ export const App: React.FC = () => {
         message: `Starting 11-step automation for Page ${startPage} to ${endPage} (${pageCount * 6} Deals across ${pageCount} pages)${dealMsg}...`,
         severity: 'info',
       });
-      await api.startRun({ startPage, endPage, startDealNumber });
-      setRunState((prev) => ({
-        ...prev,
-        isRunning: true,
-        currentPage: startPage,
-        startPage,
-        endPage,
-        selectedPages: pageCount,
-      }));
+      const res = await api.startRun({ startPage, endPage, startDealNumber });
+      applyStartRunResponse(res, startPage, endPage);
     } catch (err: any) {
       setToast({ message: `Failed to start: ${err.message}`, severity: 'error' });
     }
@@ -455,7 +501,7 @@ export const App: React.FC = () => {
                   size="small"
                   startIcon={<DownloadIcon />}
                   component="a"
-                  href={`/api/reports/download/${encodeURIComponent(completionData.report.fileName)}`}
+                  href={api.getDownloadUrl(completionData.report.fileName)}
                   download={completionData.report.fileName}
                   target="_blank"
                   sx={{

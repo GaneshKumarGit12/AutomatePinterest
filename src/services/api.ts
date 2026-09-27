@@ -1,22 +1,119 @@
 import axios from 'axios';
-import { RunConfig, RunState, ProductDeal } from '../types/index.ts';
+import { ProductDeal } from '../types/index.ts';
 
-const API_BASE = ''; // Talks to current host (or proxy port 8000 / 3001)
+const LOCAL_ENGINE_URL = 'http://localhost:3001';
+
+const isRemoteHost =
+  typeof window !== 'undefined' &&
+  window.location.hostname !== 'localhost' &&
+  window.location.hostname !== '127.0.0.1';
+
+let activeApiBase = '';
+let localEngineConfirmed = !isRemoteHost;
+let probePromise: Promise<string> | null = null;
+
+function setActiveApiBase(nextBase: string) {
+  if (activeApiBase !== nextBase) {
+    activeApiBase = nextBase;
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('api-base-changed', { detail: activeApiBase }));
+    }
+  }
+}
+
+export async function ensureApiBase(): Promise<string> {
+  if (!isRemoteHost) {
+    return '';
+  }
+  if (localEngineConfirmed && activeApiBase === LOCAL_ENGINE_URL) {
+    return activeApiBase;
+  }
+  if (probePromise) {
+    return probePromise;
+  }
+
+  probePromise = axios
+    .get(`${LOCAL_ENGINE_URL}/api/status`, { timeout: 2500 })
+    .then((res) => {
+      if (res.status === 200 && res.data?.status === 'online') {
+        localEngineConfirmed = true;
+        setActiveApiBase(LOCAL_ENGINE_URL);
+        return LOCAL_ENGINE_URL;
+      }
+      return activeApiBase;
+    })
+    .catch(() => {
+      localEngineConfirmed = false;
+      setActiveApiBase('');
+      return '';
+    })
+    .finally(() => {
+      probePromise = null;
+    });
+
+  return probePromise;
+}
+
+// Kick off initial local engine discovery immediately on load
+if (isRemoteHost) {
+  ensureApiBase();
+}
 
 const client = axios.create({
-  baseURL: API_BASE,
-  timeout: 120000, // 2 minutes to prevent premature 30000ms timeouts on browser automation
+  timeout: 120000, // 2 minutes to prevent premature timeouts on browser automation
 });
 
+client.interceptors.request.use(async (config) => {
+  const base = await ensureApiBase();
+  config.baseURL = base;
+  return config;
+});
+
+client.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    // If local engine stopped mid-session, fall back to cloud relative origin and retry once
+    if (
+      isRemoteHost &&
+      activeApiBase === LOCAL_ENGINE_URL &&
+      !error.response &&
+      error.config &&
+      !error.config.__retriedCloud
+    ) {
+      localEngineConfirmed = false;
+      setActiveApiBase('');
+      error.config.__retriedCloud = true;
+      error.config.baseURL = '';
+      return client.request(error.config);
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const api = {
+  getApiBase: () => activeApiBase,
+
+  resolveUrl: (path: string) => {
+    if (!path) return '';
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    return `${activeApiBase}${normalized}`;
+  },
+
   // Get engine status
   getStatus: async () => {
+    if (isRemoteHost && !localEngineConfirmed) {
+      await ensureApiBase();
+    }
     const res = await client.get('/api/status');
     return res.data;
   },
 
   // Get paginated deals (6 products per page)
-  getDeals: async (page: number = 1, pageSize: number = 6): Promise<{
+  getDeals: async (
+    page: number = 1,
+    pageSize: number = 6
+  ): Promise<{
     page: number;
     pageSize: number;
     totalPages: number;
@@ -42,6 +139,7 @@ export const api = {
     startCardIndex?: number;
     startDealNumber?: number;
   }) => {
+    await ensureApiBase();
     const res = await client.post('/api/automation/start', config);
     return res.data;
   },
@@ -70,7 +168,8 @@ export const api = {
     return res.data;
   },
 
-  getDownloadUrl: (filename: string) => `/api/reports/download/${encodeURIComponent(filename)}`,
+  getDownloadUrl: (filename: string) =>
+    `${activeApiBase}/api/reports/download/${encodeURIComponent(filename)}`,
 
   // Social Media Hub (Twitter @ganeshkumard1 & Facebook Worldnewzs)
   shareToSocial: async (payload: {
@@ -117,6 +216,7 @@ export const api = {
     specificPinIds?: string[];
     destination?: 'both' | 'page' | 'group';
   }) => {
+    await ensureApiBase();
     const res = await client.post('/api/social/pinterest-facebook-share', payload);
     return res.data;
   },
@@ -132,8 +232,15 @@ export const api = {
   },
 
   // Get lazy-loadable Pinterest pins from Dhanvi Collection
-  getFacebookPins: async (page: number = 1, pageSize: number = 12, filter: string = 'pending', forceRefresh: boolean = false) => {
-    const res = await client.get(`/api/social/facebook-pins?page=${page}&pageSize=${pageSize}&filter=${filter}&forceRefresh=${forceRefresh}`);
+  getFacebookPins: async (
+    page: number = 1,
+    pageSize: number = 12,
+    filter: string = 'pending',
+    forceRefresh: boolean = false
+  ) => {
+    const res = await client.get(
+      `/api/social/facebook-pins?page=${page}&pageSize=${pageSize}&filter=${filter}&forceRefresh=${forceRefresh}`
+    );
     return res.data;
   },
 
@@ -143,8 +250,9 @@ export const api = {
     return res.data;
   },
 
-  getExportExcelUrl: () => '/api/social/export-excel',
-  getExportPdfUrl: () => '/api/social/export-pdf',
-  getLiveFrameUrl: () => `/api/social/live-frame?t=${Date.now()}`,
+  getExportExcelUrl: () => `${activeApiBase}/api/social/export-excel`,
+  getExportPdfUrl: () => `${activeApiBase}/api/social/export-pdf`,
+  getLiveFrameUrl: () => `${activeApiBase}/api/social/live-frame?t=${Date.now()}`,
+  getProofUrl: (filename: string) =>
+    `${activeApiBase}/api/social/proof/${encodeURIComponent(filename)}`,
 };
-

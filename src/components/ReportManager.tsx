@@ -124,7 +124,7 @@ export const ReportManager: React.FC = () => {
                       size="small"
                       startIcon={<DownloadIcon />}
                       component="a"
-                      href={`/api/reports/download/${rep.fileName}`}
+                      href={api.getDownloadUrl(rep.fileName)}
                       target="_blank"
                       download
                       sx={{ textTransform: 'none', fontWeight: 700 }}

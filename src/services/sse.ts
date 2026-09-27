@@ -1,14 +1,16 @@
 /**
  * Shared Singleton EventSource manager for AutomatePinterest.
- * Maintains exactly 1 persistent SSE connection across all components,
- * preventing HTTP/1.1 connection starvation (6-connection browser limit)
- * and resolving net::ERR_NETWORK_IO_SUSPENDED errors.
+ * Automatically bridges https://automate-pinterest-eight.vercel.app to the local
+ * Playwright/Edge CDP engine (http://localhost:3001) when available.
  */
+
+import { api, ensureApiBase } from './api.ts';
 
 type EventHandler = (data: any) => void;
 
 class SSEClient {
   private eventSource: EventSource | null = null;
+  private currentStreamUrl: string = '';
   private listeners: Map<string, Set<EventHandler>> = new Map();
   private reconnectTimer: any = null;
   private reconnectAttempts = 0;
@@ -17,7 +19,12 @@ class SSEClient {
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
         this.reconnectAttempts = 0;
-        this.connect();
+        this.connect(true);
+      });
+
+      window.addEventListener('api-base-changed', () => {
+        this.reconnectAttempts = 0;
+        this.connect(true);
       });
 
       // Handle tab visibility change (reconnect seamlessly if browser suspended background socket)
@@ -32,11 +39,16 @@ class SSEClient {
     }
   }
 
-  public connect() {
+  public async connect(forceReconnect: boolean = false) {
     if (typeof window === 'undefined') return;
 
+    await ensureApiBase();
+    const targetUrl = `${api.getApiBase()}/api/automation/stream`;
+
     if (
+      !forceReconnect &&
       this.eventSource &&
+      this.currentStreamUrl === targetUrl &&
       (this.eventSource.readyState === EventSource.OPEN ||
         this.eventSource.readyState === EventSource.CONNECTING)
     ) {
@@ -48,8 +60,16 @@ class SSEClient {
       this.reconnectTimer = null;
     }
 
+    if (this.eventSource) {
+      try {
+        this.eventSource.close();
+      } catch (_) {}
+      this.eventSource = null;
+    }
+
     try {
-      this.eventSource = new EventSource('/api/automation/stream');
+      this.currentStreamUrl = targetUrl;
+      this.eventSource = new EventSource(targetUrl);
 
       this.eventSource.onopen = () => {
         this.reconnectAttempts = 0;
@@ -63,13 +83,11 @@ class SSEClient {
       };
 
       this.eventSource.onerror = () => {
-        // When network suspends, closes, or tab sleeps, cleanly close and backoff
         if (this.eventSource) {
           this.eventSource.close();
           this.eventSource = null;
         }
 
-        // Exponential backoff between 2s and 30s
         const delay = Math.min(30000, 2000 * Math.pow(1.5, this.reconnectAttempts));
         this.reconnectAttempts++;
 

@@ -229,11 +229,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   };
 
   const handleExportExcel = () => {
-    window.open('/api/social/export-excel', '_blank');
+    window.open(api.getExportExcelUrl(), '_blank');
   };
 
   const handleExportPdf = () => {
-    window.open('/api/social/export-pdf', '_blank');
+    window.open(api.getExportPdfUrl(), '_blank');
   };
 
   const handleOpenHistory = async () => {
@@ -1119,7 +1119,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             <IconButton
               size="small"
               onClick={() => {
-                setLiveBrowserFrame(`/api/social/live-frame?t=${Date.now()}`);
+                setLiveBrowserFrame(api.getLiveFrameUrl());
               }}
               title="Refresh Screen"
               sx={{ color: '#94A3B8', '&:hover': { color: '#FFF' } }}
@@ -1128,7 +1128,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             </IconButton>
             <IconButton
               size="small"
-              onClick={() => window.open('/api/social/live-frame', '_blank')}
+              onClick={() => window.open(api.getLiveFrameUrl(), '_blank')}
               title="Open full view in new tab"
               sx={{ color: '#94A3B8', '&:hover': { color: '#FFF' } }}
             >
@@ -1164,7 +1164,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             }}
           >
             <img
-              src={liveBrowserFrame || `/api/social/live-frame?t=${Date.now()}`}
+              src={liveBrowserFrame ? api.resolveUrl(liveBrowserFrame) : api.getLiveFrameUrl()}
               alt="Playwright Live Screen"
               onError={(e: any) => {
                 e.target.style.display = 'none';
@@ -1502,7 +1502,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                                 onClick={() => {
                                   const sc = log.screenshot || log.screenshotPath;
                                   const filename = sc.split(/[\/\\]/).pop();
-                                  setActiveProofUrl(`/api/social/proof/${filename}`);
+                                  setActiveProofUrl(api.getProofUrl(filename));
                                 }}
                                 title="View Proof Screenshot"
                                 sx={{ color: '#1877F2' }}
