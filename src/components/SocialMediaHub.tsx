@@ -90,6 +90,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   const [historyStats, setHistoryStats] = useState<any>(null);
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
+  const wasRunningRef = useRef<boolean>(false);
 
   const fetchDhanviPins = async (page = pinPage, filter = pinFilter, forceRefresh = false) => {
     setIsLoadingPins(true);
@@ -116,12 +117,95 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     } catch (_) {}
   };
 
+  const handleBatchComplete = (batchData: any) => {
+    if (batchData) {
+      setLastBatchResult(batchData);
+      if (batchData.runId) {
+        try {
+          sessionStorage.setItem('fb_share_ack_run_id', String(batchData.runId));
+        } catch (_) {}
+      }
+    }
+    wasRunningRef.current = false;
+    setIsFbShareRunning(false);
+    setFbShareStep(null);
+    setCompletedModalOpen(true);
+    setSelectedPinIds(new Set());
+    setStatusMessage({
+      text: `🎉 Pinterest → Facebook Share completed! Published ${batchData?.successCount ?? batchData?.totalShared ?? 'all'} pin(s) to WorldNewzs Page & Amazon Affiliate Group.`,
+      severity: 'success',
+    });
+    api.cleanPostedPins().catch(() => {});
+    fetchDhanviPins(1, undefined, true);
+    fetchHistory();
+  };
+
+  const checkFbShareStatus = async () => {
+    try {
+      const status = await api.getPinterestFacebookStatus();
+      if (!status) return;
+
+      if (Array.isArray(status.recentLogs) && status.recentLogs.length > 0) {
+        setSocialLogs((prev) => {
+          if (prev.length === 0) return status.recentLogs;
+          const existingMessages = new Set(prev.map((l) => `${l.timestamp || ''}|${l.message}`));
+          const newLogs = status.recentLogs.filter(
+            (l: any) => !existingMessages.has(`${l.timestamp || ''}|${l.message}`)
+          );
+          if (newLogs.length === 0) return prev;
+          return [...prev, ...newLogs].slice(-200);
+        });
+      }
+
+      if (status.isRunning) {
+        wasRunningRef.current = true;
+        setIsFbShareRunning(true);
+        if (status.currentStep) {
+          setFbShareStep({
+            step: status.currentStep,
+            message: status.lastStepMessage || `Processing Pin #${status.currentPin || 1}/${status.totalPins || 1}...`,
+          });
+        }
+      } else {
+        const ackRunId = (() => {
+          try {
+            return sessionStorage.getItem('fb_share_ack_run_id');
+          } catch {
+            return null;
+          }
+        })();
+        const latestRunId = status.lastBatchResult?.runId ? String(status.lastBatchResult.runId) : null;
+
+        if (wasRunningRef.current) {
+          handleBatchComplete(status.lastBatchResult || {
+            totalShared: status.results?.filter((r: any) => r.status === 'success').length || fbSharePinCount,
+            successCount: status.results?.filter((r: any) => r.status === 'success').length || fbSharePinCount,
+            skippedCount: status.results?.filter((r: any) => r.status === 'skipped').length || 0,
+            failedCount: status.results?.filter((r: any) => r.status === 'failed').length || 0,
+            excelReport: status.lastExcelReport,
+            pdfReport: status.lastPdfReport,
+          });
+        } else if (latestRunId && latestRunId !== ackRunId && status.lastBatchResult) {
+          handleBatchComplete(status.lastBatchResult);
+        } else {
+          setIsFbShareRunning(false);
+          setFbShareStep(null);
+          if (status.lastBatchResult && !lastBatchResult) {
+            setLastBatchResult(status.lastBatchResult);
+          }
+        }
+      }
+    } catch (_) {}
+  };
+
   useEffect(() => {
     fetchDhanviPins(pinPage, pinFilter);
   }, [pinPage, pinFilter]);
 
   useEffect(() => {
     fetchHistory();
+    checkFbShareStatus();
+    const statusPoll = setInterval(checkFbShareStatus, 3000);
 
     // Subscribe to SSE via shared singleton client
     const unsubs = [
@@ -137,18 +221,17 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         }
       }),
       sseClient.subscribe('fb_share_complete', (data: any) => {
-        setLastBatchResult(data);
-        setIsFbShareRunning(false);
-        setFbShareStep(null);
-        setCompletedModalOpen(true);
-        setSelectedPinIds(new Set());
-        api.cleanPostedPins().catch(() => {});
-        fetchDhanviPins(1, undefined, true);
-        fetchHistory();
+        handleBatchComplete(data);
+      }),
+      sseClient.subscribe('state_change', (data: any) => {
+        if (data && data.fbShareRunning === false && wasRunningRef.current) {
+          checkFbShareStatus();
+        }
       }),
     ];
 
     return () => {
+      clearInterval(statusPoll);
       unsubs.forEach((unsub) => unsub());
     };
   }, []);
@@ -180,9 +263,15 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
 
   const handlePinterestFacebookShare = async () => {
     if (isFbShareRunning) return;
+    wasRunningRef.current = true;
     setIsFbShareRunning(true);
-    setFbShareStep(null);
-    const countToShare = selectedPinIds.size > 0 ? selectedPinIds.size : fbSharePinCount;
+    setFbShareStep({ step: 1, message: 'Verifying Facebook session & WorldNewzs Page identity...' });
+    const countToShare =
+      selectedPinIds.size > 0
+        ? selectedPinIds.size
+        : fbSharePinCount === 0
+        ? Math.max(1, pendingCount)
+        : fbSharePinCount;
     const destLabel = fbDestination === 'both' ? 'WorldNewzs Page & Group' : fbDestination === 'page' ? 'WorldNewzs Page Feed' : 'Amazon Affiliate Group';
     setStatusMessage({
       text: `🚀 Starting Pinterest → Facebook Share (${countToShare} unposted pin(s) to ${destLabel}, ${fbShareDelay}s delay)...`,
@@ -205,7 +294,24 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         text: `Pinterest → Facebook share failed: ${err.message || err}`,
         severity: 'error',
       });
+      wasRunningRef.current = false;
       setIsFbShareRunning(false);
+      setFbShareStep(null);
+    }
+  };
+
+  const handleStopFacebookShare = async () => {
+    try {
+      await api.stopPinterestFacebookShare();
+      setStatusMessage({
+        text: '⏹️ Stopping Facebook Share after current action and generating Excel & PDF reports...',
+        severity: 'warning',
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        text: `Stop request error: ${err.message || err}`,
+        severity: 'error',
+      });
     }
   };
 
@@ -401,6 +507,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 cursor: 'pointer',
               }}
             >
+              <option value={0}>All Unposted ({pendingCount})</option>
               <option value={5}>5 Pins</option>
               <option value={10}>10 Pins (Recommended)</option>
               <option value={15}>15 Pins</option>
@@ -445,7 +552,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             size="medium"
             startIcon={isFbShareRunning ? <CircularProgress size={16} color="inherit" /> : <FacebookIcon />}
             onClick={() => handlePinterestFacebookShare()}
-            disabled={isFbShareRunning}
+            disabled={isFbShareRunning || (pendingCount === 0 && selectedPinIds.size === 0)}
             sx={{
               bgcolor: '#1877F2',
               color: '#FFFFFF',
@@ -462,8 +569,33 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           >
             {isFbShareRunning
               ? 'Sharing to Facebook...'
-              : `🚀 Share ${selectedPinIds.size > 0 ? selectedPinIds.size : fbSharePinCount} Unposted Pins`}
+              : `🚀 Share ${
+                  selectedPinIds.size > 0
+                    ? selectedPinIds.size
+                    : fbSharePinCount === 0
+                    ? pendingCount
+                    : fbSharePinCount
+                } Unposted Pins`}
           </Button>
+
+          {isFbShareRunning && (
+            <Button
+              variant="contained"
+              size="medium"
+              color="error"
+              onClick={handleStopFacebookShare}
+              sx={{
+                fontWeight: 800,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 2,
+                py: 0.9,
+                fontSize: '0.84rem',
+              }}
+            >
+              ⏹️ Stop & Finish
+            </Button>
+          )}
 
           {/* Select 10 Unposted Helper Button */}
           <Button
@@ -877,9 +1009,64 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         </Box>
       ) : dhanviPins.length === 0 ? (
         <Paper variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 2 }}>
-          <Typography variant="body2" color="text.secondary" fontWeight={600}>
-            🎉 All Dhanvi Collection pins have been published to Facebook or cleaned! Click "Refresh Pins" to discover newly published pins from Pinterest.
+          <Typography variant="body1" color="#0F172A" fontWeight={800} sx={{ mb: 0.5 }}>
+            🎉 All Dhanvi Collection pins have been published to Facebook or cleaned!
           </Typography>
+          <Typography variant="body2" color="text.secondary" fontWeight={500} sx={{ mb: 2 }}>
+            Click "Refresh Pins" to discover newly published pins from Pinterest, or download your completion reports below:
+          </Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+            <Button
+              variant="contained"
+              size="medium"
+              startIcon={<TableChartIcon />}
+              onClick={handleExportExcel}
+              sx={{
+                bgcolor: '#059669',
+                color: '#FFFFFF',
+                fontWeight: 800,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 2.5,
+                '&:hover': { bgcolor: '#047857' },
+              }}
+            >
+              📊 Export Excel
+            </Button>
+            <Button
+              variant="contained"
+              size="medium"
+              startIcon={<PictureAsPdfIcon />}
+              onClick={handleExportPdf}
+              sx={{
+                bgcolor: '#DC2626',
+                color: '#FFFFFF',
+                fontWeight: 800,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 2.5,
+                '&:hover': { bgcolor: '#B91C1C' },
+              }}
+            >
+              📄 Download PDF
+            </Button>
+            <Button
+              variant="outlined"
+              size="medium"
+              startIcon={<CheckCircleIcon />}
+              onClick={() => setCompletedModalOpen(true)}
+              sx={{
+                borderColor: '#2563EB',
+                color: '#1D4ED8',
+                fontWeight: 800,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 2.5,
+              }}
+            >
+              🏆 View Completion Summary
+            </Button>
+          </Box>
         </Paper>
       ) : (
         <Grid container spacing={2}>
@@ -1222,12 +1409,12 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         PaperProps={{ sx: { borderRadius: 3, p: 1 } }}
       >
         <DialogTitle sx={{ textAlign: 'center', pt: 2, pb: 1 }}>
-          <CheckCircleIcon sx={{ fontSize: 48, color: '#16A34A', mb: 1 }} />
+          <CheckCircleIcon sx={{ fontSize: 52, color: '#16A34A', mb: 1 }} />
           <Typography variant="h5" fontWeight={800} color="#0F172A">
             Pinterest → Facebook Share Complete!
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Automated sharing of unposted Dhanvi Collection pins has finished.
+            Automated sharing of unposted Dhanvi Collection pins to WorldNewzs Page & Amazon Affiliate Group has finished.
           </Typography>
         </DialogTitle>
 
@@ -1247,7 +1434,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           >
             <Box>
               <Typography variant="h4" fontWeight={900} color="#16A34A">
-                {lastBatchResult?.totalShared ?? lastBatchResult?.sharedCount ?? fbSharePinCount}
+                {lastBatchResult?.successCount ?? lastBatchResult?.totalShared ?? lastBatchResult?.sharedCount ?? postedCount}
               </Typography>
               <Typography variant="caption" fontWeight={700} color="text.secondary">
                 PINS POSTED
@@ -1264,20 +1451,20 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             </Box>
             <Divider orientation="vertical" flexItem />
             <Box>
-              <Typography variant="h4" fontWeight={900} color="#2563EB">
-                100%
+              <Typography variant="h4" fontWeight={900} color={lastBatchResult?.failedCount ? '#DC2626' : '#2563EB'}>
+                {lastBatchResult?.failedCount ? `${lastBatchResult.failedCount} Failed` : '100%'}
               </Typography>
               <Typography variant="caption" fontWeight={700} color="text.secondary">
-                DEDUPLICATED
+                {lastBatchResult?.failedCount ? 'FAILED' : 'SUCCESS RATE'}
               </Typography>
             </Box>
           </Paper>
 
           <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }}>
-            Live proofs and audit records are saved. You can download the complete activity spreadsheet and dated PDF report below:
+            Live proofs and deduplication audit records are saved. Click below to export your Excel spreadsheet or download the dated PDF report:
           </Alert>
 
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+          <Box sx={{ display: 'flex', gap: 1.5, flexDirection: { xs: 'column', sm: 'row' } }}>
             <Button
               variant="contained"
               fullWidth
@@ -1290,11 +1477,13 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 fontWeight: 800,
                 textTransform: 'none',
                 borderRadius: 2,
-                py: 1.2,
+                py: 1.4,
+                fontSize: '0.95rem',
+                boxShadow: '0 4px 12px rgba(5, 150, 105, 0.25)',
                 '&:hover': { bgcolor: '#047857' },
               }}
             >
-              📥 Download Live Proof Excel (.xlsx)
+              📊 Export Excel
             </Button>
             <Button
               variant="contained"
@@ -1308,11 +1497,13 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 fontWeight: 800,
                 textTransform: 'none',
                 borderRadius: 2,
-                py: 1.2,
+                py: 1.4,
+                fontSize: '0.95rem',
+                boxShadow: '0 4px 12px rgba(220, 38, 38, 0.25)',
                 '&:hover': { bgcolor: '#B91C1C' },
               }}
             >
-              📄 Download Dated PDF Activity Report
+              📄 Download PDF
             </Button>
           </Box>
         </DialogContent>
@@ -1323,7 +1514,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             variant="outlined"
             sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2, px: 4 }}
           >
-            Done & View Updated Pins
+            Done & Close
           </Button>
         </DialogActions>
       </Dialog>

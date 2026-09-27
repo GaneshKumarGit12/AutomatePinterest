@@ -995,6 +995,7 @@ async def execute_pinterest_facebook_share(
     destination: str = "both",
     log_fn: Optional[Callable[[str, str], None]] = None,
     live_frame_fn: Optional[Callable[[str], None]] = None,
+    should_stop_fn: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Executes Pinterest Pin → Facebook Page & Group share targeting UNPOSTED pins only.
@@ -1075,15 +1076,19 @@ async def execute_pinterest_facebook_share(
         published_count = 0
         seen_pin_ids: set = set()
 
-        # Check if user explicitly provided pin IDs to share
+        # Load cached unposted pins from DHANVI_PINS_CACHE
         cached_lookup = {}
+        cached_unposted_list = []
         if os.path.exists(DHANVI_PINS_CACHE):
             try:
                 with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
                     for cp in json.load(f):
                         cid = str(cp.get("pinId", "")).strip()
+                        curl = cp.get("pinUrl", "").strip() or (f"https://in.pinterest.com/pin/{cid}/" if cid else "")
                         if cid:
                             cached_lookup[cid] = cp
+                            if not ledger.is_posted_to_facebook(cid, curl):
+                                cached_unposted_list.append(cp)
             except Exception:
                 pass
 
@@ -1092,27 +1097,52 @@ async def execute_pinterest_facebook_share(
             for sp_id in specific_pin_ids:
                 s_clean = str(sp_id).strip()
                 if len(s_clean) >= 10:
+                    s_url = f"https://in.pinterest.com/pin/{s_clean}/"
+                    if ledger.is_posted_to_facebook(s_clean, s_url):
+                        continue
                     if s_clean in cached_lookup:
                         explicit_pins.append(cached_lookup[s_clean])
                     else:
                         explicit_pins.append({
                             "pinId": s_clean,
-                            "pinUrl": f"https://in.pinterest.com/pin/{s_clean}/",
+                            "pinUrl": s_url,
                             "title": f"Pinterest Deal {s_clean}",
                             "price": "",
                             "imageUrl": "",
                         })
+        elif cached_unposted_list:
+            # Use the unposted pins from cache directly (up to pin_count) so we never hang scrolling when cache runs out
+            target_limit = pin_count if pin_count > 0 else len(cached_unposted_list)
+            explicit_pins = cached_unposted_list[:target_limit]
 
         if explicit_pins:
-            log("info", f"🎯 Processing {len(explicit_pins)} user-selected pin(s) directly to Facebook...")
+            total_explicit = len(explicit_pins)
+            log("info", f"🎯 Processing {total_explicit} unposted pin(s) directly to Facebook...")
             for pin_idx, pin_item in enumerate(explicit_pins, 1):
+                if should_stop_fn and should_stop_fn():
+                    log("warning", "⏹️ Stop requested by user. Finishing current Facebook share batch...")
+                    break
+
                 pin_id = pin_item.get("pinId", "").strip()
                 pin_url = pin_item.get("pinUrl", "").strip() or f"https://in.pinterest.com/pin/{pin_id}/"
                 pin_title = pin_item.get("title", "").strip() or f"Pinterest Deal {pin_id}"
                 pin_price = pin_item.get("price", "").strip()
                 pin_image_url = pin_item.get("imageUrl", "").strip()
 
-                log("info", f"🔍 Processing User-Selected Pin #{pin_idx}/{len(explicit_pins)}: ID={pin_id} | Title: {pin_title[:50]}... ({pin_price})")
+                if ledger.is_posted_to_facebook(pin_id, pin_url):
+                    log("info", f"⏩ Pin #{pin_idx}/{total_explicit} (ID: {pin_id}) is already posted to Facebook. Skipping...")
+                    remove_pin_from_cache(pin_id, pin_url)
+                    results.append({
+                        "pinIndex": pin_idx,
+                        "pinUrl": pin_url,
+                        "pinId": pin_id,
+                        "title": pin_title,
+                        "status": "skipped",
+                        "reason": "Already posted to Facebook",
+                    })
+                    continue
+
+                log("info", f"🔍 Processing User-Selected Pin #{pin_idx}/{total_explicit}: ID={pin_id} | Title: {pin_title[:50]}... ({pin_price})")
 
                 # Scroll target pin card on Pinterest feed if visible
                 try:
@@ -1253,15 +1283,22 @@ async def execute_pinterest_facebook_share(
                         except Exception:
                             pass
 
-                if published_count < len(explicit_pins) and delay_seconds > 0:
+                # Only sleep if there are more pins remaining in explicit_pins
+                if pin_idx < total_explicit and delay_seconds > 0:
                     log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next pin...")
-                    await asyncio.sleep(delay_seconds)
+                    for _ in range(int(delay_seconds)):
+                        if should_stop_fn and should_stop_fn():
+                            break
+                        await asyncio.sleep(1)
 
         scroll_attempt = 0
         max_scroll_attempts = 50
         consecutive_empty_scrolls = 0
 
-        while published_count < pin_count and scroll_attempt < max_scroll_attempts:
+        while not explicit_pins and published_count < pin_count and scroll_attempt < max_scroll_attempts:
+            if should_stop_fn and should_stop_fn():
+                log("warning", "⏹️ Stop requested by user. Finishing current Facebook share batch...")
+                break
             log("info", f"📌 --- Scanning Pinterest Feed (Published: {published_count}/{pin_count} | Unique Pins Seen: {len(seen_pin_ids)}) ---")
 
             # Locate all pin cards currently rendered in the DOM
@@ -1573,7 +1610,10 @@ async def execute_pinterest_facebook_share(
                 # Pacing delay between successfully published pins
                 if published_count < pin_count and delay_seconds > 0:
                     log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next pin...")
-                    await asyncio.sleep(delay_seconds)
+                    for _ in range(int(delay_seconds)):
+                        if should_stop_fn and should_stop_fn():
+                            break
+                        await asyncio.sleep(1)
 
             # If more pins are needed, scroll down to load more pins from the account
             if published_count < pin_count:
@@ -1588,11 +1628,6 @@ async def execute_pinterest_facebook_share(
                     log("warning", f"⚠️ Reached the end of Pinterest pins feed ({len(seen_pin_ids)} unique pins checked). Stopping.")
                     break
 
-            # Pacing delay between batch passes
-            if published_count < pin_count and delay_seconds > 0:
-                log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next pin...")
-                await asyncio.sleep(delay_seconds)
-
     finally:
         if not pinterest_page.is_closed():
             await pinterest_page.close()
@@ -1604,6 +1639,8 @@ async def execute_pinterest_facebook_share(
 
     summary = {
         "totalPins": pin_count,
+        "totalShared": success_cnt,
+        "sharedCount": success_cnt,
         "successCount": success_cnt,
         "skippedCount": skip_cnt,
         "failedCount": fail_cnt,
@@ -1631,6 +1668,8 @@ async def execute_pinterest_facebook_share(
     return {
         "success": success_cnt > 0 or (success_cnt == 0 and skip_cnt > 0),
         "totalPins": pin_count,
+        "totalShared": success_cnt,
+        "sharedCount": success_cnt,
         "successCount": success_cnt,
         "skippedCount": skip_cnt,
         "failedCount": fail_cnt,

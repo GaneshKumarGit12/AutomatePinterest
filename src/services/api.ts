@@ -222,7 +222,14 @@ export const api = {
   },
 
   getPinterestFacebookStatus: async () => {
+    await ensureApiBase();
     const res = await client.get('/api/social/pinterest-facebook-status');
+    return res.data;
+  },
+
+  stopPinterestFacebookShare: async () => {
+    await ensureApiBase();
+    const res = await client.post('/api/social/pinterest-facebook-stop');
     return res.data;
   },
 
