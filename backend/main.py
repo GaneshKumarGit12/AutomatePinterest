@@ -115,6 +115,12 @@ async def add_private_network_access_headers(request: Request, call_next):
 
 
 # Global State
+STATE_FILE_PATH = (
+    "/tmp/last_run_state.json"
+    if os.environ.get("VERCEL")
+    else os.path.join(PROJECT_ROOT, "state", "last_run_state.json")
+)
+
 _run_state = {
     "isRunning": False,
     "runId": 0,
@@ -129,6 +135,27 @@ _run_state = {
     "lastCompletionData": None,
     "startTime": None,
 }
+
+try:
+    if os.path.exists(STATE_FILE_PATH):
+        with open(STATE_FILE_PATH, "r", encoding="utf-8") as _sf:
+            _loaded_state = json.load(_sf)
+            if isinstance(_loaded_state, dict):
+                _run_state.update(_loaded_state)
+                _run_state["isRunning"] = False
+except Exception:
+    pass
+
+
+def save_run_state_snapshot():
+    """Persists _run_state to disk so restarts preserve progress and reports."""
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
+        with open(STATE_FILE_PATH, "w", encoding="utf-8") as sf:
+            json.dump(_run_state, sf, indent=2)
+    except Exception:
+        pass
+
 
 _event_queues: List[asyncio.Queue] = []
 
@@ -345,18 +372,28 @@ async def run_automation_worker(
                     on_step_callback=on_step,
                 )
 
-                # Auto-recovery if browser disconnected or closed
-                if not result.get("success") and ("closed" in str(result.get("error", "")).lower() or "target page" in str(result.get("error", "")).lower()):
-                    broadcast_event("log", {
-                        "level": "warn",
-                        "message": f"⚠️ Browser disconnected during Card [{card_idx+1}/{len(deals)}]. Reconnecting browser session and retrying card..."
-                    })
-                    try:
-                        await close_browser_context()
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2)
-                    context = await get_browser_context()
+                # Auto-recovery & retry if card failed on first attempt
+                if not result.get("success"):
+                    err_low = str(result.get("error", "")).lower()
+                    if "closed" in err_low or "target page" in err_low:
+                        broadcast_event("log", {
+                            "level": "warn",
+                            "message": f"⚠️ Browser disconnected during Card [{card_idx+1}/{len(deals)}]. Reconnecting browser session and retrying card..."
+                        })
+                        try:
+                            await close_browser_context()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+                        context = await get_browser_context()
+                    else:
+                        broadcast_event("log", {
+                            "level": "warn",
+                            "message": f"🔄 Retrying Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']}..."
+                        })
+                        await asyncio.sleep(1.5)
+                        context = await get_healthy_context(context)
+
                     result = await execute_11_step_pipeline(
                         context=context,
                         deal=deal,
@@ -423,6 +460,7 @@ async def run_automation_worker(
             "message": completion_msg,
         }
         _run_state["lastCompletionData"] = completion_payload
+        save_run_state_snapshot()
 
         broadcast_event("log", {
             "level": "success",
@@ -434,6 +472,103 @@ async def run_automation_worker(
         broadcast_event("log", {"level": "error", "message": f"Automation error: {str(e)}"})
     finally:
         _run_state["isRunning"] = False
+        save_run_state_snapshot()
+        broadcast_event("state_change", {"isRunning": False})
+
+
+async def retry_failed_cards_worker():
+    """Retries any failed cards in _run_state['processedCards'] in-place and regenerates the PDF report."""
+    global _run_state
+    _run_state["isRunning"] = True
+    broadcast_event("state_change", {"isRunning": True})
+    try:
+        context = await get_browser_context()
+        await ensure_pinterest_authenticated(context)
+
+        cards = _run_state.get("processedCards", [])
+        failed_indices = [i for i, c in enumerate(cards) if c.get("status") != "success"]
+
+        broadcast_event("log", {
+            "level": "info",
+            "message": f"🔄 Retrying {len(failed_indices)} failed card(s) from current batch..."
+        })
+
+        for idx in failed_indices:
+            if not _run_state["isRunning"]:
+                break
+            card_rec = cards[idx]
+            page_idx = int(card_rec.get("pageNumber", 1))
+            card_idx = int(card_rec.get("cardIndex", 0))
+            deals = get_deals_for_page(page_idx, 6)
+            deal = deals[card_idx] if card_idx < len(deals) else card_rec
+            share_url = card_rec.get("shareUrl") or build_pinterest_share_url(deal)
+
+            _run_state["currentPage"] = page_idx
+            _run_state["currentCardIndex"] = card_idx
+            _run_state["currentProductTitle"] = deal.get("truncatedTitle", "")
+
+            def on_step(step_entry):
+                _run_state["stepLogs"].append(step_entry)
+                if len(_run_state["stepLogs"]) > 50:
+                    _run_state["stepLogs"] = _run_state["stepLogs"][-50:]
+                broadcast_event("step_log", step_entry)
+
+            context = await get_healthy_context(context)
+            res = await execute_11_step_pipeline(
+                context=context,
+                deal=deal,
+                share_url=share_url,
+                collaborators=["auto"],
+                on_step_callback=on_step,
+            )
+
+            if res.get("success"):
+                card_rec["status"] = "success"
+                card_rec["error"] = None
+                card_rec["collaborators"] = res.get("collaborators") or card_rec.get("collaborators")
+                broadcast_event("log", {
+                    "level": "success",
+                    "message": f"✅ Retry COMPLETED (Page {page_idx} Card {card_idx+1}): {deal.get('truncatedTitle')}"
+                })
+            else:
+                card_rec["error"] = res.get("error")
+                broadcast_event("log", {
+                    "level": "error",
+                    "message": f"❌ Retry FAILED (Page {page_idx} Card {card_idx+1}): {res.get('error')}"
+                })
+
+            save_run_state_snapshot()
+            await asyncio.sleep(1)
+
+        start_page = int(_run_state.get("startPage", 9))
+        end_page = int(_run_state.get("endPage", 12))
+        total_pages = max(1, end_page - start_page + 1)
+        summary = {
+            "total_cards": len(cards),
+            "success_count": sum(1 for c in cards if c.get("status") == "success"),
+            "failed_count": sum(1 for c in cards if c.get("status") == "failed"),
+            "pages_count": total_pages,
+            "start_page": start_page,
+            "end_page": end_page,
+            "duration_seconds": int(time.time() - (_run_state.get("startTime") or time.time())),
+        }
+        report_info = generate_daily_activity_pdf(summary, cards, REPORT_DIR)
+        _run_state["lastReportPath"] = report_info["fullPath"]
+        completion_msg = f"Automate process between page {start_page} to {end_page} completed"
+        completion_payload = {
+            "runId": _run_state.get("runId", 1),
+            "summary": summary,
+            "report": report_info,
+            "startPage": start_page,
+            "endPage": end_page,
+            "message": completion_msg,
+        }
+        _run_state["lastCompletionData"] = completion_payload
+        save_run_state_snapshot()
+        broadcast_event("run_complete", completion_payload)
+    finally:
+        _run_state["isRunning"] = False
+        save_run_state_snapshot()
         broadcast_event("state_change", {"isRunning": False})
 
 
@@ -643,6 +778,18 @@ async def start_automation(req: StartRunRequest, background_tasks: BackgroundTas
         "startDealNumber": start_deal_number,
     }
 
+
+
+@app.post("/api/automation/retry-failed")
+async def retry_failed_automation(background_tasks: BackgroundTasks):
+    """Retries any failed cards from the current runState in-place and regenerates the PDF report."""
+    if _run_state["isRunning"]:
+        raise HTTPException(status_code=400, detail="Automation is already running.")
+    failed_count = sum(1 for c in _run_state.get("processedCards", []) if c.get("status") != "success")
+    if failed_count == 0:
+        return {"success": True, "message": "No failed cards to retry.", "failedCount": 0}
+    background_tasks.add_task(retry_failed_cards_worker)
+    return {"success": True, "message": f"Retrying {failed_count} failed card(s)...", "failedCount": failed_count}
 
 
 @app.post("/api/automation/stop")

@@ -22,7 +22,7 @@ from backend.engine.session_manager import (
 PROFILE_URL = os.environ.get("PINTEREST_PROFILE_URL") or "https://in.pinterest.com/ganeshkumardevarasetty/_saved/"
 GOOGLE_EMAIL = os.environ.get("PINTEREST_EMAIL") or "ganeshkumard56@gmail.com"
 DEFAULT_COLLABORATORS = ["auto"]
-_max_boards_reached = False
+_max_boards_reached = True
 
 
 async def handle_login_if_needed(page: Page) -> bool:
@@ -432,41 +432,53 @@ async def execute_11_step_pipeline(
 
             async def select_and_save_to_existing_board():
                 nonlocal selected_existing_board_name
-                # Ensure search field doesn't hide available boards if no match
                 search_input = '#pickerSearchField, input[placeholder*="Search" i], [data-test-id="board-search-input"]'
-                try:
+
+                for attempt in range(3):
+                    try:
+                        await pin_tab.wait_for_selector(
+                            '[data-test-id="board-selection"] div[role="button"]',
+                            timeout=12000,
+                        )
+                    except Exception:
+                        pass
+
                     row_count = await pin_tab.locator('[data-test-id="board-selection"] div[role="button"]').count()
-                    if row_count == 0:
+                    if row_count > 0:
+                        break
+
+                    # If no rows visible, clear search input or reload Pin Builder
+                    try:
                         s_el = await pin_tab.query_selector(search_input)
                         if s_el:
-                            await s_el.click()
-                            await pin_tab.keyboard.press("Control+A")
-                            await pin_tab.keyboard.press("Backspace")
-                            await asyncio.sleep(1.5)
-                except Exception:
-                    pass
-
-                try:
-                    await pin_tab.wait_for_selector('[data-test-id="board-selection"] div[role="button"]', timeout=15000)
-                except Exception:
-                    pass
+                            val = await s_el.input_value()
+                            if val:
+                                await s_el.fill("")
+                                await asyncio.sleep(2.0)
+                                if await pin_tab.locator('[data-test-id="board-selection"] div[role="button"]').count() > 0:
+                                    break
+                        if attempt < 2:
+                            print(f"[Pinterest Flow] Reloading Pin Builder board list (attempt {attempt + 1})...")
+                            await pin_tab.goto(share_url, wait_until="domcontentloaded", timeout=45000)
+                            await asyncio.sleep(2.5)
+                    except Exception:
+                        pass
 
                 card_idx_num = int(deal.get("cardIndex", 0))
-                board_info = await pin_tab.evaluate(f"""(cardIdx) => {{
+                board_info = await pin_tab.evaluate("""(cardIdx) => {
                     const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
                     if (!rows.length) return null;
                     const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
-                    const pool = collabRows.length > 0 ? collabRows : rows;
+                    const pool = (collabRows.length > 0 ? collabRows : rows).slice(0, 3);
                     const target = pool[cardIdx % pool.length] || rows[0];
-                    target.scrollIntoView({{ block: 'center', behavior: 'instant' }});
                     const rect = target.getBoundingClientRect();
                     const name = (target.innerText || '').split('\\n')[0].trim();
-                    return {{
+                    return {
                         name,
                         x: rect.left + rect.width / 2,
                         y: rect.top + rect.height / 2
-                    }};
-                }}""", card_idx_num)
+                    };
+                }""", card_idx_num)
 
                 if board_info:
                     selected_existing_board_name = board_info.get("name") or "Existing Collaborative Board"
@@ -481,13 +493,13 @@ async def execute_11_step_pipeline(
                     await pin_tab.evaluate(
                         f"window.__triggerClickPulse && window.__triggerClickPulse({cx}, {cy});"
                     )
-                    await pin_tab.evaluate(f"""(cardIdx) => {{
+                    await pin_tab.evaluate("""(cardIdx) => {
                         const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
                         const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
-                        const pool = collabRows.length > 0 ? collabRows : rows;
+                        const pool = (collabRows.length > 0 ? collabRows : rows).slice(0, 3);
                         const target = pool[cardIdx % pool.length] || rows[0];
                         if (target) target.click();
-                    }}""", card_idx_num)
+                    }""", card_idx_num)
                     await asyncio.sleep(2.0)
                     return True
                 return False
