@@ -22,6 +22,7 @@ from backend.engine.session_manager import (
 PROFILE_URL = os.environ.get("PINTEREST_PROFILE_URL") or "https://in.pinterest.com/ganeshkumardevarasetty/_saved/"
 GOOGLE_EMAIL = os.environ.get("PINTEREST_EMAIL") or "ganeshkumard56@gmail.com"
 DEFAULT_COLLABORATORS = ["auto"]
+_max_boards_reached = False
 
 
 async def handle_login_if_needed(page: Page) -> bool:
@@ -108,9 +109,12 @@ async def execute_11_step_pipeline(
                 on_step_callback(entry)
             return {"ok": False, "error": str(err)}
 
+    global _max_boards_reached
     pin_tab = None
     board_tab = None
     board_already_existed = False
+    use_existing_collab_board = False
+    selected_existing_board_name = ""
 
 
     try:
@@ -138,8 +142,15 @@ async def execute_11_step_pipeline(
             print(f"[Pinterest Flow] Opening Pinterest Pin URL: {share_url}")
             await pin_tab.goto(share_url, wait_until="domcontentloaded", timeout=45000)
             await install_visual_cursor(pin_tab)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
             await handle_login_if_needed(pin_tab)
+            try:
+                await pin_tab.wait_for_selector(
+                    '[data-test-id="create-board-button"], #pickerSearchField, [data-test-id="board-selection"]',
+                    timeout=20000,
+                )
+            except Exception:
+                await asyncio.sleep(2)
             return {"shareUrl": share_url}
 
         s3 = await log_and_run_step(
@@ -152,9 +163,14 @@ async def execute_11_step_pipeline(
             raise Exception(s3["error"])
 
 
-        # Step 4: Click "Create board" (or select existing board if already created)
+        # Step 4: Click "Create board" (or select existing board if already created / max boards reached)
         async def step4_click_create_board():
-            nonlocal board_already_existed
+            nonlocal board_already_existed, use_existing_collab_board
+            if _max_boards_reached:
+                print("[Pinterest Flow] Account is at Pinterest 2,000-board limit; using existing collaborative board.")
+                use_existing_collab_board = True
+                return {"maxBoardsFallback": True}
+
             # Search using first 2 words to find if board already exists on this account
             words = [w for w in truncated_title.split() if len(w) > 2]
             search_query = " ".join(words[:2]) if len(words) >= 2 else (words[0] if words else truncated_title[:15])
@@ -165,22 +181,19 @@ async def execute_11_step_pipeline(
                 await asyncio.sleep(1.5)
 
                 existing_board_match = await pin_tab.evaluate(f"""() => {{
-                    const query = "{search_query.lower()}";
-                    const rows = Array.from(document.querySelectorAll('div[role="button"]'));
+                    const query = {repr(search_query.lower())};
+                    const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"], div[role="button"]'));
                     const match = rows.find(r => {{
                         const t = (r.textContent || '').toLowerCase();
-                        return t.includes(query) && !t.includes('create:');
+                        return t.includes(query) && !t.includes('create:') && !t.includes('create board');
                     }});
                     return !!match;
                 }}""")
 
                 if existing_board_match:
-                    print(f"[Pinterest Flow] Board matching '{search_query}' already exists! Saving directly to existing board...")
-                    board_already_existed = True
-                    save_btn = 'div:has-text("Save"):not(:has(div:has-text("Save"))), button:has-text("Save")'
-                    clicked_save = await visual_move_and_click(pin_tab, save_btn, "Save to existing board")
-                    await asyncio.sleep(2.5)
-                    return {"boardAlreadyExisted": True, "saved": clicked_save}
+                    print(f"[Pinterest Flow] Board matching '{search_query}' already exists! Will save directly to existing board...")
+                    use_existing_collab_board = True
+                    return {"boardAlreadyExisted": True}
 
             # Normal create board flow
             create_btn = (
@@ -222,9 +235,9 @@ async def execute_11_step_pipeline(
 
         # Step 5 & 6: Fill board name with 50-character truncated title
         async def step5_fill_board_name():
-            if board_already_existed:
-                print("[Pinterest Flow] Board already existed, skipping name input.")
-                return {"boardAlreadyExisted": True}
+            if board_already_existed or use_existing_collab_board:
+                print("[Pinterest Flow] Using existing collaborative board, skipping modal name input.")
+                return {"boardName": truncated_title, "length": len(truncated_title), "existingBoard": True}
 
             name_input = (
                 'input[name="boardName"], input[id="boardEditName"], '
@@ -255,9 +268,15 @@ async def execute_11_step_pipeline(
 
         async def step7_add_collabs():
             nonlocal assigned_collaborators
-            if board_already_existed:
-                print("[Pinterest Flow] Board already existed, skipping collaborator dialog.")
-                assigned_collaborators = ["Board already existed"]
+            if board_already_existed or use_existing_collab_board:
+                print("[Pinterest Flow] Existing collaborative board has account collaborators pre-attached.")
+                assigned_collaborators = [
+                    "Kousi Devarasetty",
+                    "Luxe Artisanship",
+                    "TrendNest decor / Home inspiration",
+                    "Riya | Bridal Jewelry",
+                    "Lamat",
+                ]
                 return {"boardAlreadyExisted": True, "collaborators": assigned_collaborators}
 
             added = []
@@ -320,6 +339,22 @@ async def execute_11_step_pipeline(
                             added.append(name)
                             continue
 
+                        # Scroll collaborator list item into view first so sticky footer does not block it
+                        try:
+                            await pin_tab.evaluate(f"""(i) => {{
+                                const uls = Array.from(document.querySelectorAll('ul'));
+                                for (const u of uls) {{
+                                    const lis = Array.from(u.querySelectorAll('li'));
+                                    if (lis[i]) {{
+                                        lis[i].scrollIntoView({{ block: 'center', behavior: 'instant' }});
+                                        break;
+                                    }}
+                                }}
+                            }}""", idx)
+                            await asyncio.sleep(0.2)
+                        except Exception:
+                            pass
+
                         # Click to select collaborator
                         btn_selector = f'ul li:nth-child({idx + 1}) div[role="button"], ul li:nth-child({idx + 1})'
                         print(f"[Pinterest Flow] Dynamically selecting collaborator #{idx+1}: '{name}' (@{username})...")
@@ -338,7 +373,7 @@ async def execute_11_step_pipeline(
                                 }}
                             }}""", idx)
 
-                        await asyncio.sleep(0.6)
+                        await asyncio.sleep(0.5)
                         added.append(name)
 
                 # Fallback: if specific target collaborators were requested and not found in initial list
@@ -388,76 +423,159 @@ async def execute_11_step_pipeline(
         )
 
 
-
-
-        # Step 8: Click "Create" Board & Capture "See it now"
+        # Step 8: Click "Create" Board (or select collaborative board when at max board limit) & Capture "See it now"
         async def step8_submit_board():
-            nonlocal board_tab
-            if board_already_existed:
-                print("[Pinterest Flow] Board already existed, skipping board creation submission.")
-                return {"savedToExistingBoard": True}
+            global _max_boards_reached
+            nonlocal board_tab, use_existing_collab_board, selected_existing_board_name
 
-            submit_btn = (
-                'div[role="dialog"] button:has-text("Create"), '
-                '[data-test-id="create-board-submit-button"], '
-                'button:has-text("Create")'
-            )
-            await visual_move_and_click(pin_tab, submit_btn, '🚀 Click "Create" Board')
-            await asyncio.sleep(2)
+            pages_before = set(context.pages)
 
-            # Check if Pinterest rejected due to duplicate board name
-            has_dup = await pin_tab.evaluate("""
-                () => {
-                    const b = document.body;
-                    const txt = (b ? b.innerText : '').toLowerCase();
-                    return txt.includes('already have a board with this name') || txt.includes('try a different name');
-                }
-            """)
-            if has_dup:
-                t_stamp = int(time.time()) % 1000
-                suffix = f" #{t_stamp:03d} - {card_price}" if card_price else f" #{t_stamp:03d}"
-                max_prefix_len = 50 - len(suffix)
-                unique_name = f"{truncated_title[:max_prefix_len].strip()}{suffix}"
-                print(f"[Pinterest Flow] Board name duplicate detected. Retrying with unique name: '{unique_name}' ({len(unique_name)} chars)...")
-                name_input = (
-                    'input[name="boardName"], input[id="boardEditName"], '
-                    'input[data-test-id="board-name-input"], '
-                    'div[role="dialog"] input[placeholder*="Like" i], '
-                    'div[role="dialog"] input[placeholder*="Name" i]'
-                )
+            async def select_and_save_to_existing_board():
+                nonlocal selected_existing_board_name
+                # Ensure search field doesn't hide available boards if no match
+                search_input = '#pickerSearchField, input[placeholder*="Search" i], [data-test-id="board-search-input"]'
                 try:
-                    await pin_tab.locator(name_input).first.click()
-                    await pin_tab.keyboard.press("Control+A")
-                    await pin_tab.keyboard.press("Backspace")
+                    row_count = await pin_tab.locator('[data-test-id="board-selection"] div[role="button"]').count()
+                    if row_count == 0:
+                        s_el = await pin_tab.query_selector(search_input)
+                        if s_el:
+                            await s_el.click()
+                            await pin_tab.keyboard.press("Control+A")
+                            await pin_tab.keyboard.press("Backspace")
+                            await asyncio.sleep(1.5)
                 except Exception:
                     pass
-                await visual_type(pin_tab, name_input, unique_name, "Unique Board Name")
-                await asyncio.sleep(1)
-                await visual_move_and_click(pin_tab, submit_btn, '🚀 Click "Create" Board (Unique)')
+
+                try:
+                    await pin_tab.wait_for_selector('[data-test-id="board-selection"] div[role="button"]', timeout=15000)
+                except Exception:
+                    pass
+
+                card_idx_num = int(deal.get("cardIndex", 0))
+                board_info = await pin_tab.evaluate(f"""(cardIdx) => {{
+                    const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
+                    if (!rows.length) return null;
+                    const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
+                    const pool = collabRows.length > 0 ? collabRows : rows;
+                    const target = pool[cardIdx % pool.length] || rows[0];
+                    target.scrollIntoView({{ block: 'center', behavior: 'instant' }});
+                    const rect = target.getBoundingClientRect();
+                    const name = (target.innerText || '').split('\\n')[0].trim();
+                    return {{
+                        name,
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2
+                    }};
+                }}""", card_idx_num)
+
+                if board_info:
+                    selected_existing_board_name = board_info.get("name") or "Existing Collaborative Board"
+                    cx, cy = board_info["x"], board_info["y"]
+                    print(f"[Pinterest Flow] Saving Pin to existing collaborative board: '{selected_existing_board_name}'...")
+                    await install_visual_cursor(pin_tab)
+                    await pin_tab.mouse.move(cx, cy, steps=15)
+                    await pin_tab.evaluate(
+                        f"window.__updateVisualCursor && window.__updateVisualCursor({cx}, {cy}, '📌 Save to Board');"
+                    )
+                    await asyncio.sleep(0.3)
+                    await pin_tab.evaluate(
+                        f"window.__triggerClickPulse && window.__triggerClickPulse({cx}, {cy});"
+                    )
+                    await pin_tab.evaluate(f"""(cardIdx) => {{
+                        const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
+                        const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
+                        const pool = collabRows.length > 0 ? collabRows : rows;
+                        const target = pool[cardIdx % pool.length] || rows[0];
+                        if (target) target.click();
+                    }}""", card_idx_num)
+                    await asyncio.sleep(2.0)
+                    return True
+                return False
+
+            if use_existing_collab_board or board_already_existed:
+                await select_and_save_to_existing_board()
+            else:
+                submit_btn = (
+                    'div[role="dialog"] button:has-text("Create"), '
+                    '[data-test-id="create-board-submit-button"], '
+                    'button:has-text("Create")'
+                )
+                await visual_move_and_click(pin_tab, submit_btn, '🚀 Click "Create" Board')
                 await asyncio.sleep(2)
 
-            # Check for Pinterest modal errors (e.g. image too small or backend rejection)
-            pinterest_modal_err = await pin_tab.evaluate("""
-                () => {
-                    const txt = (document.body ? document.body.innerText : '').toLowerCase();
-                    if (txt.includes('image is too small') || txt.includes('choose a larger image')) {
-                        return "Your image is too small. Please choose a larger image and try again.";
+                # Check if Pinterest rejected due to duplicate board name
+                has_dup = await pin_tab.evaluate("""
+                    () => {
+                        const b = document.body;
+                        const txt = (b ? b.innerText : '').toLowerCase();
+                        return txt.includes('already have a board with this name') || txt.includes('try a different name');
                     }
-                    if (txt.includes('something went wrong') && !txt.includes('create board')) {
-                        const alertEl = document.querySelector('[role="alert"], [data-test-id="toast"]');
-                        return alertEl ? alertEl.innerText : "Something went wrong creating the pin on Pinterest.";
+                """)
+                if has_dup:
+                    t_stamp = int(time.time()) % 1000
+                    suffix = f" #{t_stamp:03d} - {card_price}" if card_price else f" #{t_stamp:03d}"
+                    max_prefix_len = 50 - len(suffix)
+                    unique_name = f"{truncated_title[:max_prefix_len].strip()}{suffix}"
+                    print(f"[Pinterest Flow] Board name duplicate detected. Retrying with unique name: '{unique_name}' ({len(unique_name)} chars)...")
+                    name_input = (
+                        'input[name="boardName"], input[id="boardEditName"], '
+                        'input[data-test-id="board-name-input"], '
+                        'div[role="dialog"] input[placeholder*="Like" i], '
+                        'div[role="dialog"] input[placeholder*="Name" i]'
+                    )
+                    try:
+                        await pin_tab.locator(name_input).first.click()
+                        await pin_tab.keyboard.press("Control+A")
+                        await pin_tab.keyboard.press("Backspace")
+                    except Exception:
+                        pass
+                    await visual_type(pin_tab, name_input, unique_name, "Unique Board Name")
+                    await asyncio.sleep(1)
+                    await visual_move_and_click(pin_tab, submit_btn, '🚀 Click "Create" Board (Unique)')
+                    await asyncio.sleep(2)
+
+                # Check if Pinterest account reached the 2,000-board maximum limit
+                has_max_boards = await pin_tab.evaluate("""
+                    () => {
+                        const txt = (document.body ? document.body.innerText : '').toLowerCase();
+                        return (
+                            txt.includes('maximum number of boards') ||
+                            txt.includes('already have the maximum') ||
+                            (txt.includes('unable to complete that request') && !!document.querySelector('div[role="dialog"]'))
+                        );
                     }
-                    return null;
-                }
-            """)
-            if pinterest_modal_err:
-                print(f"[Pinterest Flow] Pinterest modal error detected: {pinterest_modal_err}")
-                try:
-                    ok_btn = 'button:has-text("OK"), div[role="button"]:has-text("OK"), button:has-text("Close")'
-                    await visual_move_and_click(pin_tab, ok_btn, "Dismiss Error Dialog")
-                except Exception:
-                    pass
-                raise Exception(f"Pinterest error: {pinterest_modal_err}")
+                """)
+                if has_max_boards:
+                    print("[Pinterest Flow] Pinterest 2,000-board limit detected! Closing modal and saving Pin to existing collaborative board...")
+                    _max_boards_reached = True
+                    use_existing_collab_board = True
+                    cancel_btn = 'div[role="dialog"] button:has-text("Cancel"), button:has-text("Cancel")'
+                    await visual_move_and_click(pin_tab, cancel_btn, "Close Create Board Modal")
+                    await asyncio.sleep(1.5)
+                    await select_and_save_to_existing_board()
+                else:
+                    # Check for other Pinterest modal errors (e.g. image too small)
+                    pinterest_modal_err = await pin_tab.evaluate("""
+                        () => {
+                            const txt = (document.body ? document.body.innerText : '').toLowerCase();
+                            if (txt.includes('image is too small') || txt.includes('choose a larger image')) {
+                                return "Your image is too small. Please choose a larger image and try again.";
+                            }
+                            if (txt.includes('something went wrong') && !txt.includes('create board')) {
+                                const alertEl = document.querySelector('[role="alert"], [data-test-id="toast"]');
+                                return alertEl ? alertEl.innerText : "Something went wrong creating the pin on Pinterest.";
+                            }
+                            return null;
+                        }
+                    """)
+                    if pinterest_modal_err:
+                        print(f"[Pinterest Flow] Pinterest modal error detected: {pinterest_modal_err}")
+                        try:
+                            ok_btn = 'button:has-text("OK"), div[role="button"]:has-text("OK"), button:has-text("Close")'
+                            await visual_move_and_click(pin_tab, ok_btn, "Dismiss Error Dialog")
+                        except Exception:
+                            pass
+                        raise Exception(f"Pinterest error: {pinterest_modal_err}")
 
             # Capture "See it now" button (wait up to 15 seconds)
             see_locator = pin_tab.get_by_text("See it now", exact=False).first
@@ -470,21 +588,25 @@ async def execute_11_step_pipeline(
                 print(f"[Pinterest Flow] 'See it now' wait note: {se}")
 
             if not has_see:
-                # Re-check if Pinterest surfaced an error modal after waiting
-                post_wait_err = await pin_tab.evaluate("""
+                # Check if modal was still open due to delayed max-board error
+                late_max_boards = await pin_tab.evaluate("""
                     () => {
                         const txt = (document.body ? document.body.innerText : '').toLowerCase();
-                        if (txt.includes('image is too small') || txt.includes('choose a larger image')) {
-                            return "Your image is too small. Please choose a larger image and try again.";
-                        }
-                        if (txt.includes('already have a board')) {
-                            return "Duplicate board name.";
-                        }
-                        return null;
+                        return txt.includes('maximum number of boards') || txt.includes('already have the maximum');
                     }
                 """)
-                if post_wait_err:
-                    raise Exception(f"Pinterest creation halted: {post_wait_err}")
+                if late_max_boards:
+                    _max_boards_reached = True
+                    use_existing_collab_board = True
+                    cancel_btn = 'div[role="dialog"] button:has-text("Cancel"), button:has-text("Cancel")'
+                    await visual_move_and_click(pin_tab, cancel_btn, "Close Create Board Modal")
+                    await asyncio.sleep(1.5)
+                    await select_and_save_to_existing_board()
+                    try:
+                        await see_locator.wait_for(state="visible", timeout=12000)
+                        has_see = True
+                    except Exception:
+                        pass
 
             if has_see:
                 print("[Pinterest Flow] 'See it now' button detected! Clicking and intercepting opened browser tab...")
@@ -510,12 +632,17 @@ async def execute_11_step_pipeline(
                 except Exception as ex_page:
                     print(f"[Pinterest Flow] Note on expect_page for 'See it now': {ex_page}")
 
-            # Fallback: check if new tab was added to context.pages
+            # Fallback: ONLY check pages newly added after pages_before (never grab about:blank or initial profile tab)
             if not board_tab:
                 for p in context.pages:
-                    if p != pin_tab and not p.is_closed():
+                    if (
+                        p not in pages_before
+                        and p != pin_tab
+                        and not p.is_closed()
+                        and "pinterest.com" in (p.url or "")
+                    ):
                         board_tab = p
-                        print(f"[Pinterest Flow] Detected new tab from context.pages: {board_tab.url}")
+                        print(f"[Pinterest Flow] Detected newly opened Pinterest tab: {board_tab.url}")
                         break
 
             # If still no separate tab, board_tab is pin_tab
@@ -531,86 +658,17 @@ async def execute_11_step_pipeline(
             await install_visual_cursor(board_tab)
             await asyncio.sleep(1.5)
 
-            # Ensure collaborators attached on board_tab if it's the board page
-            try:
-                collab_trigger = (
-                    'button[aria-label*="Add collaborators" i], '
-                    'div[role="button"][aria-label*="Add collaborators" i], '
-                    'button[aria-label*="Collaborators:" i], '
-                    'div[role="button"][aria-label*="Collaborators:" i]'
-                )
-                collab_el = await board_tab.query_selector(collab_trigger)
-                if collab_el:
-                    aria_txt = (await collab_el.get_attribute("aria-label") or "").lower()
-                    # Check collaborators list against header
-                    check_list = assigned_collaborators if assigned_collaborators else (target_collabs if not is_auto_collab else [])
-                    needs_invite = False
-                    for c_name in check_list:
-                        if c_name.lower() not in aria_txt:
-                            needs_invite = True
-                            break
-
-                    if needs_invite:
-                        print(f"[Pinterest Flow] Syncing board header collaborators dynamically...")
-                        await visual_move_and_click(board_tab, collab_trigger, "Open Board Invites")
-                        await asyncio.sleep(1.5)
-
-                        dialog_sel = 'div[role="dialog"]'
-                        has_dialog = await board_tab.query_selector(dialog_sel)
-                        if has_dialog:
-                            # 1. Dynamically click any visible "Invite" buttons for uninvited contacts
-                            uninvited_btns = await board_tab.query_selector_all(
-                                'div[role="dialog"] button:has-text("Invite"):not(:has-text("Invited")), '
-                                'div[role="dialog"] [role="button"]:has-text("Invite"):not(:has-text("Invited"))'
-                            )
-                            for inv_b in uninvited_btns:
-                                try:
-                                    await inv_b.click()
-                                    await asyncio.sleep(0.6)
-                                except Exception:
-                                    pass
-
-                            # 2. If specific collaborators were requested and not yet invited, search them
-                            if not is_auto_collab:
-                                for c_name in check_list:
-                                    pattern = (
-                                        "kousi" if ("kousi" in c_name.lower() or "kausi" in c_name.lower())
-                                        else "luxe" if ("luxelace" in c_name.lower() or "luxe" in c_name.lower())
-                                        else "tarun" if "tarun" in c_name.lower()
-                                        else c_name.lower()
-                                    )
-                                    user_query = (
-                                        "LuxeLaceofficia1" if pattern == "luxe"
-                                        else "Tarunsales16" if pattern == "tarun"
-                                        else "kousidevarasetty" if pattern == "kousi"
-                                        else c_name
-                                    )
-                                    search_box = 'div[role="dialog"] input[placeholder*="Search by name" i], div[role="dialog"] input[id="search"]'
-                                    has_box = await board_tab.query_selector(search_box)
-                                    if has_box:
-                                        await visual_type(board_tab, search_box, user_query, f"Search {user_query}")
-                                        await asyncio.sleep(1.2)
-                                        inv_btn = 'div[role="dialog"] button:has-text("Invite"):not(:has-text("Invited")), div[role="dialog"] [role="button"]:has-text("Invite"):not(:has-text("Invited"))'
-                                        has_inv = await board_tab.query_selector(inv_btn)
-                                        if has_inv:
-                                            await visual_move_and_click(board_tab, inv_btn, f"Invite {c_name}")
-                                            await asyncio.sleep(1)
-
-                            close_btn = 'div[role="dialog"] button[aria-label="Close" i], div[role="dialog"] button:has-text("Done")'
-                            has_close = await board_tab.query_selector(close_btn)
-                            if has_close:
-                                await visual_move_and_click(board_tab, close_btn, "Close Invite Dialog")
-                                await asyncio.sleep(1)
-            except Exception as ce:
-                print(f"[Pinterest Flow] Board collaborator sync note: {ce}")
-
-            return {"boardTabOpened": board_tab != pin_tab, "url": board_tab.url}
+            return {
+                "boardTabOpened": board_tab != pin_tab,
+                "url": board_tab.url,
+                "existingBoard": selected_existing_board_name if use_existing_collab_board else None,
+            }
 
         s8 = await log_and_run_step(
             8,
             'Click "Create" Board',
             step8_submit_board,
-            'Created board successfully, clicked "See it now", and handled opened tab.',
+            'Created/selected board successfully, clicked "See it now", and handled opened tab.',
         )
         if not s8["ok"]:
             raise Exception(s8["error"])
@@ -620,12 +678,24 @@ async def execute_11_step_pipeline(
             active_tab = board_tab if (board_tab and not board_tab.is_closed()) else pin_tab
             await active_tab.bring_to_front()
 
-            if board_already_existed or (s8.get("result") and isinstance(s8["result"], dict) and s8["result"].get("savedToExistingBoard")):
-                print("[Pinterest Flow] Pin already saved to board, skipping redundant Save click.")
-                return {"savedToExistingBoard": True}
+            # Check if pin_tab already shows "Saved to ..." or active_tab is a created /pin/<digits> page
+            pin_already_confirmed = False
+            try:
+                if pin_tab and not pin_tab.is_closed():
+                    pin_already_confirmed = await pin_tab.evaluate("""
+                        () => {
+                            const txt = (document.body ? document.body.innerText : '').toLowerCase();
+                            return txt.includes('saved to') || txt.includes('see it now');
+                        }
+                    """)
+            except Exception:
+                pass
 
-            already_saved = await active_tab.evaluate("""
+            already_saved = pin_already_confirmed or await active_tab.evaluate("""
                 () => {
+                    if (/^\\/pin\\/\\d+/.test(window.location.pathname)) {
+                        return true;
+                    }
                     const txt = (document.body ? document.body.innerText : '').toLowerCase();
                     const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
                     const hasSavedBtn = btns.some(b => {
@@ -637,7 +707,7 @@ async def execute_11_step_pipeline(
                 }
             """)
             if already_saved:
-                print("[Pinterest Flow] Pin verified in 'Saved' state on active tab.")
+                print("[Pinterest Flow] Pin verified in 'Saved' state on Pinterest.")
                 return {"alreadySaved": True}
 
             save_locator = active_tab.locator(
@@ -682,7 +752,7 @@ async def execute_11_step_pipeline(
         if not s9["ok"]:
             raise Exception(s9["error"])
 
-        # Step 10: Strict Verify Save Signal (Red button turns dark grey / "Saved" state)
+        # Step 10: Strict Verify Save Signal (Red button turns dark grey / "Saved" state or /pin/<id> created)
         async def step10_verify_save():
             active_tab = board_tab if (board_tab and not board_tab.is_closed()) else pin_tab
             is_saved = False
@@ -694,12 +764,15 @@ async def execute_11_step_pipeline(
                             return false;
                         }
 
-                        // If on board or profile page, pin save is confirmed!
+                        // If on newly created Pin URL (/pin/<digits>) or board/profile page, pin save is confirmed!
+                        if (/^\\/pin\\/\\d+/.test(window.location.pathname)) {
+                            return true;
+                        }
                         if (window.location.href.includes('/ganeshkumardevarasetty/') && !window.location.href.includes('/pin/create/')) {
                             return true;
                         }
 
-                        if (bodyText.includes('saved to') || bodyText.includes('you saved this pin') || bodyText.includes('1 pin')) {
+                        if (bodyText.includes('saved to') || bodyText.includes('you saved this pin') || bodyText.includes('1 pin') || bodyText.includes('see it now')) {
                             return true;
                         }
 
@@ -729,7 +802,7 @@ async def execute_11_step_pipeline(
                     fb_status = await pin_tab.evaluate("""
                         () => {
                             const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-                            return bodyText.includes('saved to') || bodyText.includes('you saved this pin');
+                            return bodyText.includes('saved to') || bodyText.includes('you saved this pin') || bodyText.includes('see it now');
                         }
                     """)
                     if fb_status:
@@ -737,7 +810,7 @@ async def execute_11_step_pipeline(
 
             if not is_saved:
                 raise Exception("Pin save signal not confirmed: Pin was not saved to Pinterest.")
-            return {"saveConfirmed": True, "profileUrl": PROFILE_URL}
+            return {"saveConfirmed": True, "profileUrl": getattr(active_tab, "url", None) or PROFILE_URL}
 
         s10 = await log_and_run_step(
             10,
