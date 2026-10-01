@@ -30,6 +30,14 @@ except ImportError:
     Page = Any  # type: ignore
 
 from backend.engine.session_manager import get_browser_context
+from backend.engine.browser_agent import install_visual_cursor
+from backend.engine.scraper import (
+    get_unposted_facebook_deals,
+    load_products_dataset,
+    format_amazon_product_card,
+    sync_live_products,
+    sanitize_image_url,
+)
 from backend.engine.social_manager import (
     DeduplicationLedger,
     ContentShuffler,
@@ -50,6 +58,7 @@ if hasattr(sys.stdout, "reconfigure") and sys.stdout.encoding != "utf-8":
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _WRITABLE_ROOT = "/tmp" if os.environ.get("VERCEL") else PROJECT_ROOT
+WORLDNEWZS_PRODUCTS_URL = os.environ.get("WORLDNEWZS_PRODUCTS_URL", "https://worldnewzs.in/amazon-products")
 PINTEREST_CREATED_URL = os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
 PINTEREST_SAVED_URL = os.environ.get("PINTEREST_SAVED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_saved/")
 FB_PAGE_NAME = os.environ.get("FACEBOOK_PAGE_NAME", "Worldnewzs")
@@ -68,9 +77,21 @@ except OSError:
 
 def resolve_pin_image_from_pinterest(pin_id: str, pin_url: str = "") -> str:
     """
-    Auto-resolves the high-res Pinterest CDN image URL from the Pinterest pin page
-    using og:image or JSON-LD metadata.
+    Auto-resolves high-res Amazon or Pinterest image URL for a product/pin.
+    First checks worldnewzs.in/amazon-products dataset by ASIN, then falls back to OpenGraph.
     """
+    asin = DeduplicationLedger.extract_asin(pin_id) or DeduplicationLedger.extract_asin(pin_url)
+    if asin:
+        try:
+            for p in load_products_dataset():
+                if str(p.get("asin", "")).strip().upper() == asin:
+                    img = sanitize_image_url(p.get("imageUrl") or "", asin)
+                    if img and img.startswith("http"):
+                        return img
+        except Exception:
+            pass
+        return f"https://m.media-amazon.com/images/P/{asin}.01._SCLZZZZZZZ_SX500_.jpg"
+
     target_url = pin_url if (pin_url and pin_url.startswith("http")) else f"https://in.pinterest.com/pin/{pin_id}/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -99,7 +120,7 @@ def resolve_pin_image_from_pinterest(pin_id: str, pin_url: str = "") -> str:
             if pinimg_matches:
                 return pinimg_matches[0]
     except Exception as e:
-        _safe_print(f"[Resolve Pin Image] Failed for Pin {pin_id}: {e}")
+        _safe_print(f"[Resolve Product Image] Failed for {pin_id}: {e}")
     return ""
 
 
@@ -110,10 +131,9 @@ async def verify_and_download_pin_image(
     log_fn: Optional[Callable[[str, str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Checkpoint: Verifies that the pin has a valid high-resolution image URL,
-    auto-resolves missing images from Pinterest, and downloads the image locally
-    to state/temp_pin_images/pin_<pin_id>.jpg.
-    Returns details on the verified image URL and local file path.
+    Checkpoint: Verifies that the Amazon product / pin has a valid high-resolution image URL,
+    auto-resolves missing images from worldnewzs.in/amazon-products or Amazon CDN, and downloads
+    the image locally to state/temp_pin_images/pin_<pin_id>.jpg.
     """
     def log(lvl: str, msg: str):
         if log_fn:
@@ -127,33 +147,32 @@ async def verify_and_download_pin_image(
     if cleaned_img_url.startswith("data:"):
         cleaned_img_url = ""
 
-    # Upgrade thumbnail resolution to 736x
     if cleaned_img_url:
         cleaned_img_url = cleaned_img_url.replace("/236x/", "/736x/").replace("/474x/", "/736x/")
 
-    # Auto-resolve if missing
     if not cleaned_img_url or not cleaned_img_url.startswith("http"):
-        log("info", f"🔍 Pin {pin_id} image URL missing in cache/DOM. Querying Pinterest OpenGraph metadata...")
+        log("info", f"🔍 Product {pin_id} image URL missing. Resolving from worldnewzs.in/amazon-products dataset...")
         resolved = resolve_pin_image_from_pinterest(pin_id, pin_url)
         if resolved:
             cleaned_img_url = resolved
-            log("success", f"✅ Successfully resolved high-res image for Pin {pin_id}: {cleaned_img_url[:65]}...")
+            log("success", f"✅ Resolved high-res product image for {pin_id}: {cleaned_img_url[:65]}...")
         else:
-            log("warning", f"⚠️ Could not resolve image for Pin {pin_id} from Pinterest.")
+            log("warning", f"⚠️ Could not resolve image for {pin_id}.")
 
     if not cleaned_img_url:
         return {"verified": False, "imageUrl": "", "imagePath": None, "error": "No image URL available"}
 
-    # Download image locally
     os.makedirs(TEMP_PIN_IMAGES_DIR, exist_ok=True)
     ext = ".png" if ".png" in cleaned_img_url.lower() else ".jpg"
-    local_path = os.path.join(TEMP_PIN_IMAGES_DIR, f"pin_{pin_id}{ext}")
+    safe_id = "".join(c for c in str(pin_id) if c.isalnum() or c in ("-", "_")) or "deal"
+    local_path = os.path.join(TEMP_PIN_IMAGES_DIR, f"pin_{safe_id}{ext}")
 
     try:
         import urllib.request
+        referer = "https://www.amazon.in/" if "media-amazon.com" in cleaned_img_url else "https://worldnewzs.in/"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://in.pinterest.com/",
+            "Referer": referer,
         }
         req = urllib.request.Request(cleaned_img_url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -161,7 +180,7 @@ async def verify_and_download_pin_image(
             if len(data) > 512:
                 with open(local_path, "wb") as f_out:
                     f_out.write(data)
-                log("success", f"📸 [Checkpoint Passed] Pin {pin_id} image verified & downloaded ({len(data)} bytes -> {os.path.basename(local_path)})")
+                log("success", f"📸 [Checkpoint Passed] Product {pin_id} high-res image verified & downloaded ({len(data):,} bytes -> {os.path.basename(local_path)})")
                 return {
                     "verified": True,
                     "imageUrl": cleaned_img_url,
@@ -169,11 +188,10 @@ async def verify_and_download_pin_image(
                     "fileSize": len(data),
                 }
             else:
-                log("warning", f"⚠️ Image downloaded for Pin {pin_id} was too small ({len(data)} bytes).")
+                log("warning", f"⚠️ Image downloaded for {pin_id} was too small ({len(data)} bytes).")
     except Exception as dl_err:
         log("warning", f"⚠️ Failed downloading image from {cleaned_img_url[:60]}: {dl_err}")
 
-    # Check if a previously downloaded image exists
     if os.path.exists(local_path) and os.path.getsize(local_path) > 512:
         return {
             "verified": True,
@@ -987,31 +1005,140 @@ async def _publish_to_facebook_group(
     return {"success": True, "screenshotPath": verified_path}
 
 
+async def _spotlight_deal_on_worldnewzs_page(
+    page: Page,
+    deal: Dict[str, Any],
+    idx: int,
+    total: int,
+    live_frame_fn: Optional[Callable[[str], None]] = None,
+):
+    """
+    Visually highlights the active Amazon deal card on https://worldnewzs.in/amazon-products
+    inside the Playwright Live Browser with an animated visual cursor and HUD Spotlight overlay,
+    and streams the frame to the dashboard's Live Browser Monitor.
+    """
+    try:
+        await page.bring_to_front()
+        await install_visual_cursor(page)
+        await page.evaluate(
+            """({ deal, idx, total }) => {
+                // 1. Highlight matching card in DOM if rendered
+                const allPrev = document.querySelectorAll('[data-fb-spotlight="true"]');
+                allPrev.forEach(el => {
+                    el.style.outline = '';
+                    el.style.boxShadow = '';
+                    el.removeAttribute('data-fb-spotlight');
+                });
+
+                const asin = (deal.asin || deal.pinId || '').toUpperCase();
+                const anchors = Array.from(document.querySelectorAll('a[href*="amazon.in"], a[href*="/dp/"]'));
+                let matchedCard = null;
+                for (const a of anchors) {
+                    if (asin && (a.href || '').toUpperCase().includes(asin)) {
+                        matchedCard = a.closest('article, .card, .product-card, div[class*="card" i], div[class*="product" i]') || a.parentElement;
+                        break;
+                    }
+                }
+                if (matchedCard) {
+                    matchedCard.setAttribute('data-fb-spotlight', 'true');
+                    matchedCard.style.outline = '4px solid #1877F2';
+                    matchedCard.style.boxShadow = '0 0 28px rgba(24, 119, 242, 0.75)';
+                    matchedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+
+                // 2. Render Live Playwright HUD & Deal Spotlight Card
+                let hud = document.getElementById('fb-live-automation-hud');
+                if (!hud) {
+                    hud = document.createElement('div');
+                    hud.id = 'fb-live-automation-hud';
+                    hud.style.position = 'fixed';
+                    hud.style.bottom = '24px';
+                    hud.style.right = '24px';
+                    hud.style.width = '380px';
+                    hud.style.background = 'linear-gradient(135deg, #0F172A 0%, #1E293B 100%)';
+                    hud.style.color = '#F8FAFC';
+                    hud.style.borderRadius = '16px';
+                    hud.style.padding = '16px';
+                    hud.style.boxShadow = '0 20px 40px rgba(0,0,0,0.55), 0 0 0 2px #1877F2';
+                    hud.style.zIndex = '999999990';
+                    hud.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+                    document.body.appendChild(hud);
+                }
+
+                const pageNum = deal.pageNumber || 1;
+                const cardNum = (deal.cardIndex !== undefined ? deal.cardIndex : (idx - 1) % 6) + 1;
+                hud.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                        <span style="background:#1877F2;color:#fff;font-weight:800;font-size:11px;padding:4px 10px;border-radius:999px;">
+                            ⚡ LIVE PLAYWRIGHT • ITEM ${idx}/${total}
+                        </span>
+                        <span style="background:#FEF3C7;color:#92400E;font-weight:800;font-size:11px;padding:4px 10px;border-radius:999px;">
+                            Page ${pageNum} • Card #${cardNum}/6
+                        </span>
+                    </div>
+                    <div style="display:flex;gap:12px;align-items:center;">
+                        <img src="${deal.imageUrl || ''}" style="width:72px;height:72px;object-fit:contain;background:#fff;border-radius:10px;padding:4px;flex-shrink:0;" />
+                        <div style="overflow:hidden;">
+                            <div style="font-size:13px;font-weight:700;line-height:1.3;color:#fff;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">
+                                ${deal.title || 'Amazon Deal'}
+                            </div>
+                            <div style="margin-top:6px;display:flex;gap:8px;align-items:center;">
+                                <span style="font-size:15px;font-weight:900;color:#4ADE80;">${deal.price || ''}</span>
+                                <span style="font-size:11px;color:#94A3B8;text-decoration:line-through;">${deal.originalPrice || ''}</span>
+                                <span style="font-size:10px;font-weight:800;background:#DC2626;color:#fff;padding:2px 6px;border-radius:4px;">${deal.discount || 'DEAL'}</span>
+                            </div>
+                            <div style="margin-top:4px;font-size:10px;color:#38BDF8;font-family:monospace;">
+                                ASIN: ${asin} • Auto-Clear After Post
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                if (window.__updateVisualCursor) {
+                    window.__updateVisualCursor(window.innerWidth - 220, window.innerHeight - 90, `Picking Page ${pageNum} Card #${cardNum}: ${asin}`);
+                }
+                if (window.__triggerClickPulse) {
+                    window.__triggerClickPulse(window.innerWidth - 220, window.innerHeight - 90);
+                }
+            }""",
+            {"deal": deal, "idx": idx, "total": total},
+        )
+        await asyncio.sleep(0.8)
+        await _take_screenshot(page, f"fb_share_pin{idx}_hovered.png", live_frame_fn=live_frame_fn)
+    except Exception as e:
+        _safe_print(f"[WorldNewzs Spotlight Note] {e}")
+
+
 async def execute_pinterest_facebook_share(
-    pin_count: int = 10,
+    pin_count: int = 6,
     delay_seconds: int = 60,
     target_board_url: Optional[str] = None,
     specific_pin_ids: Optional[List[str]] = None,
     destination: str = "both",
+    start_page: int = 1,
+    end_page: Optional[int] = None,
+    page_size: int = 6,
     log_fn: Optional[Callable[[str, str], None]] = None,
     live_frame_fn: Optional[Callable[[str], None]] = None,
     should_stop_fn: Optional[Callable[[], bool]] = None,
+    on_item_cleared_fn: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Executes Pinterest Pin → Facebook Page & Group share targeting UNPOSTED pins only.
+    Executes WorldNewzs Amazon Products (worldnewzs.in/amazon-products) → Facebook Page & Group
+    automation targeting NEWLY ADDED / UNPOSTED products only (6 products per page).
     Workflow:
     1. Pre-flight verification of Facebook session & WorldNewzs Page identity switch
-    2. Open Pinterest created pins or Dhanvi Collection
-    3. Strict Facebook-only deduplication check (skip already posted on FB)
-    4. Hover target pin card -> click Share icon ('Send')
-    5. Generate dynamic shuffled deal copy
-    6. Post to Facebook Page feed ('WorldNewzs') and/or 'Amazon Affiliate Group'
-    7. Capture live proof screenshots and generate Excel (.xlsx) + PDF reports
+    2. Open https://worldnewzs.in/amazon-products in Playwright Live Browser with Visual Cursor & HUD
+    3. Snapshot-lock unposted Amazon products (6 products per page, matched by ASIN & amazon.in URL)
+    4. Spotlight active deal card on worldnewzs.in/amazon-products & verify 1500px Amazon image
+    5. Generate dynamic shuffled deal copy with ₹ price, % discount & direct amazon.in affiliate link
+    6. Publish to Facebook Page feed ('WorldNewzs') and/or 'Amazon Affiliate Group'
+    7. Immediately record ASIN in DeduplicationLedger & auto-clear posted product from active queue
     """
     ledger = DeduplicationLedger()
     results: List[Dict[str, Any]] = []
     start_time = time.time()
-    source_url = target_board_url or PINTEREST_CREATED_URL
+    source_url = WORLDNEWZS_PRODUCTS_URL
 
     def log(lvl: str, msg: str):
         if log_fn:
@@ -1019,10 +1146,76 @@ async def execute_pinterest_facebook_share(
                 log_fn(lvl, msg)
             except Exception:
                 pass
-        _safe_print(f"[Pinterest→FB] [{lvl.upper()}] {msg}")
+        _safe_print(f"[WorldNewzs→FB] [{lvl.upper()}] {msg}")
 
-    dest_label = "WorldNewzs Page + Amazon Affiliate Group" if destination == "both" else "WorldNewzs Page Feed" if destination == "page" else "Amazon Affiliate Group"
-    log("info", f"🚀 Starting Pinterest → Facebook Share automation (target pins={pin_count}, destination={dest_label}, delay={delay_seconds}s, source={source_url})...")
+    # ──────────────────────────────────────────────
+    # SNAPSHOT-LOCK UNPOSTED AMAZON PRODUCTS QUEUE (6 PER PAGE)
+    # ──────────────────────────────────────────────
+    all_products = load_products_dataset()
+    unposted_deals: List[Dict[str, Any]] = []
+    seen_asins = set()
+    for p in all_products:
+        asin = str(p.get("asin") or "").strip()
+        p_url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+        p_title = str(p.get("title") or p.get("name") or "").strip()
+        if not asin or asin in seen_asins:
+            continue
+        seen_asins.add(asin)
+        if not ledger.is_posted_to_facebook(asin, p_url, p_title):
+            idx_in_unposted = len(unposted_deals)
+            p_num = (idx_in_unposted // page_size) + 1
+            c_idx = idx_in_unposted % page_size
+            unposted_deals.append(
+                format_amazon_product_card(p, idx=c_idx, page_number=p_num, serial_number=idx_in_unposted + 1)
+            )
+
+    explicit_deals: List[Dict[str, Any]] = []
+    if specific_pin_ids and len(specific_pin_ids) > 0:
+        wanted = set(str(x).strip().upper() for x in specific_pin_ids if str(x).strip())
+        for d in unposted_deals:
+            d_asin = str(d.get("asin") or "").upper()
+            d_id = str(d.get("id") or "").upper()
+            if d_asin in wanted or d_id in wanted:
+                explicit_deals.append(d)
+    elif end_page is not None and end_page >= start_page:
+        # Page or Page-Range mode (6 unposted products per page)
+        s_idx = max(0, (start_page - 1) * page_size)
+        e_idx = max(s_idx + page_size, end_page * page_size)
+        explicit_deals = unposted_deals[s_idx:e_idx]
+    else:
+        # Count mode starting from start_page
+        s_idx = max(0, (start_page - 1) * page_size)
+        target_limit = pin_count if pin_count > 0 else len(unposted_deals)
+        explicit_deals = unposted_deals[s_idx : s_idx + target_limit]
+
+    total_to_process = len(explicit_deals)
+    dest_label = (
+        "WorldNewzs Page + Amazon Affiliate Group"
+        if destination == "both"
+        else "WorldNewzs Page Feed"
+        if destination == "page"
+        else "Amazon Affiliate Group"
+    )
+    log(
+        "info",
+        f"🚀 Starting WorldNewzs Amazon Products → Facebook Automation "
+        f"(products={total_to_process}, page={start_page}{f'-{end_page}' if end_page and end_page != start_page else ''}, "
+        f"6/page, destination={dest_label}, delay={delay_seconds}s)...",
+    )
+
+    if total_to_process == 0:
+        log("warning", "⚠️ No unposted Amazon products found for the selected page/criteria. Syncing live products...")
+        return {
+            "success": True,
+            "totalPins": 0,
+            "totalShared": 0,
+            "sharedCount": 0,
+            "successCount": 0,
+            "skippedCount": 0,
+            "failedCount": 0,
+            "durationSeconds": 0,
+            "results": [],
+        }
 
     context = await get_browser_context()
 
@@ -1034,6 +1227,7 @@ async def execute_pinterest_facebook_share(
     try:
         await safe_goto(fb_check_page, "https://www.facebook.com/", timeout=40000, log_fn=log)
         await fb_check_page.bring_to_front()
+        await install_visual_cursor(fb_check_page)
         await asyncio.sleep(2.5)
         await _take_screenshot(fb_check_page, "fb_share_step1_session_check.png", live_frame_fn=live_frame_fn)
 
@@ -1042,612 +1236,270 @@ async def execute_pinterest_facebook_share(
             log("error", "❌ Facebook session not available. Please sign in via browser.")
             return {"success": False, "error": "Facebook not logged in", "results": []}
 
-        # Automatically switch / verify active identity is WorldNewzs Page profile
         await _ensure_worldnewzs_profile(fb_check_page, fb_page_url=FB_PAGE_URL, log_fn=log)
+        await _take_screenshot(fb_check_page, "fb_share_step1_profile_ready.png", live_frame_fn=live_frame_fn)
         log("success", "✅ Step 1 complete — Facebook session & WorldNewzs Page identity verified!")
     finally:
         if not fb_check_page.is_closed():
             await fb_check_page.close()
 
     # ──────────────────────────────────────────────
-    # STEP 2: Open Pinterest Pins Feed
+    # STEP 2: Open WorldNewzs Amazon Products Feed (worldnewzs.in/amazon-products)
     # ──────────────────────────────────────────────
-    log("info", f"📌 Step 2/7: Opening Pinterest pins feed ({source_url})...")
-    pinterest_page = await context.new_page()
+    log("info", f"🛒 Step 2/7: Opening WorldNewzs Amazon Deals feed ({source_url}) in Live Browser...")
+    worldnewzs_page = await context.new_page()
+    published_count = 0
     try:
-        await safe_goto(
-            pinterest_page,
-            source_url,
-            timeout=45000,
-            log_fn=log,
-        )
-        await pinterest_page.bring_to_front()
-        await asyncio.sleep(3)
-
-        # Scroll slightly to trigger pin grid rendering
-        await pinterest_page.evaluate("window.scrollBy(0, 350)")
+        try:
+            await safe_goto(worldnewzs_page, source_url, timeout=35000, log_fn=log)
+        except Exception as nav_e:
+            log("info", f"⚡ WorldNewzs page loaded in hybrid mode ({nav_e}); activating Live Deal HUD...")
+        await worldnewzs_page.bring_to_front()
+        await install_visual_cursor(worldnewzs_page)
         await asyncio.sleep(2)
-        await _take_screenshot(pinterest_page, "fb_share_step2_created_page.png", live_frame_fn=live_frame_fn)
-        log("success", f"✅ Step 2 complete — Pinterest feed loaded ({source_url})!")
+        await _take_screenshot(worldnewzs_page, "fb_share_step2_created_page.png", live_frame_fn=live_frame_fn)
+        log("success", f"✅ Step 2 complete — WorldNewzs Amazon Products active ({total_to_process} unposted deals queued, 6 per page)!")
 
         # ──────────────────────────────────────────────
-        # PIN HARVESTING & DEDUPLICATION LOOP
+        # PROCESS EACH SNAPSHOT-LOCKED AMAZON PRODUCT
         # ──────────────────────────────────────────────
-        published_count = 0
-        seen_pin_ids: set = set()
-
-        # Load cached unposted pins from DHANVI_PINS_CACHE
-        cached_lookup = {}
-        cached_unposted_list = []
-        if os.path.exists(DHANVI_PINS_CACHE):
-            try:
-                with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
-                    for cp in json.load(f):
-                        cid = str(cp.get("pinId", "")).strip()
-                        curl = cp.get("pinUrl", "").strip() or (f"https://in.pinterest.com/pin/{cid}/" if cid else "")
-                        if cid:
-                            cached_lookup[cid] = cp
-                            if not ledger.is_posted_to_facebook(cid, curl):
-                                cached_unposted_list.append(cp)
-            except Exception:
-                pass
-
-        explicit_pins = []
-        if specific_pin_ids and any(len(str(x)) >= 10 for x in specific_pin_ids):
-            for sp_id in specific_pin_ids:
-                s_clean = str(sp_id).strip()
-                if len(s_clean) >= 10:
-                    s_url = f"https://in.pinterest.com/pin/{s_clean}/"
-                    if ledger.is_posted_to_facebook(s_clean, s_url):
-                        continue
-                    if s_clean in cached_lookup:
-                        explicit_pins.append(cached_lookup[s_clean])
-                    else:
-                        explicit_pins.append({
-                            "pinId": s_clean,
-                            "pinUrl": s_url,
-                            "title": f"Pinterest Deal {s_clean}",
-                            "price": "",
-                            "imageUrl": "",
-                        })
-        elif cached_unposted_list:
-            # Use the unposted pins from cache directly (up to pin_count) so we never hang scrolling when cache runs out
-            target_limit = pin_count if pin_count > 0 else len(cached_unposted_list)
-            explicit_pins = cached_unposted_list[:target_limit]
-
-        if explicit_pins:
-            total_explicit = len(explicit_pins)
-            log("info", f"🎯 Processing {total_explicit} unposted pin(s) directly to Facebook...")
-            for pin_idx, pin_item in enumerate(explicit_pins, 1):
-                if should_stop_fn and should_stop_fn():
-                    log("warning", "⏹️ Stop requested by user. Finishing current Facebook share batch...")
-                    break
-
-                pin_id = pin_item.get("pinId", "").strip()
-                pin_url = pin_item.get("pinUrl", "").strip() or f"https://in.pinterest.com/pin/{pin_id}/"
-                pin_title = pin_item.get("title", "").strip() or f"Pinterest Deal {pin_id}"
-                pin_price = pin_item.get("price", "").strip()
-                pin_image_url = pin_item.get("imageUrl", "").strip()
-
-                if ledger.is_posted_to_facebook(pin_id, pin_url):
-                    log("info", f"⏩ Pin #{pin_idx}/{total_explicit} (ID: {pin_id}) is already posted to Facebook. Skipping...")
-                    remove_pin_from_cache(pin_id, pin_url)
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "skipped",
-                        "reason": "Already posted to Facebook",
-                    })
-                    continue
-
-                log("info", f"🔍 Processing User-Selected Pin #{pin_idx}/{total_explicit}: ID={pin_id} | Title: {pin_title[:50]}... ({pin_price})")
-
-                # Scroll target pin card on Pinterest feed if visible
-                try:
-                    await pinterest_page.evaluate("""(id) => {
-                        const card = document.querySelector(`div[data-test-pin-id="${id}"]`) 
-                                   || document.querySelector(`div[data-pin-drag-id="${id}"]`);
-                        if (card) {
-                            card.scrollIntoView({ behavior: "instant", block: "center" });
-                        }
-                    }""", pin_id)
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-
-                await _take_screenshot(pinterest_page, f"fb_share_pin{pin_idx}_hovered.png", live_frame_fn=live_frame_fn)
-
-                if destination == "both":
-                    target_name = f"{FB_PAGE_NAME} (Page Feed + Group)"
-                elif destination == "page":
-                    target_name = f"{FB_PAGE_NAME} (Page Feed)"
-                else:
-                    target_name = f"{FB_GROUP_NAME} (Group)"
-
-                # Checkpoint: Verify and pre-download pin image locally
-                log("info", f"📸 Step 3/7: Verifying image & creating deal copy for Pin #{pin_idx} (ID: {pin_id})...")
-                img_checkpoint = await verify_and_download_pin_image(
-                    pin_id=pin_id,
-                    pin_url=pin_url,
-                    image_url=pin_image_url,
-                    log_fn=log,
-                )
-                verified_image_path = img_checkpoint.get("imagePath")
-                if img_checkpoint.get("imageUrl"):
-                    pin_image_url = img_checkpoint["imageUrl"]
-
-                deal_info = {
-                    "id": pin_id,
-                    "title": pin_title,
-                    "truncatedTitle": pin_title[:50],
-                    "pinUrl": pin_url,
-                    "shareUrl": pin_url,
-                    "price": pin_price,
-                    "discount": "",
-                    "category": "general",
-                    "imageUrl": pin_image_url,
-                }
-                post_data = ContentShuffler.generate_post(deal_info, ledger)
-                post_text = post_data.get("text", f"📌 Check out this hot deal on Pinterest: {pin_title}\n\n{pin_url}")
-                log("info", f"📝 Shuffled Copy: \"{post_text[:70]}...\"")
-
-                fb_action_page = await context.new_page()
-                try:
-                    page_proof = None
-                    group_proof = None
-
-                    if destination in ["both", "page"]:
-                        log("info", f"📄 Step 4/7: Publishing Pin #{pin_idx} (ID: {pin_id}) to WorldNewzs Facebook Page Feed...")
-                        page_res = await _publish_to_facebook_page(
-                            page=fb_action_page,
-                            post_text=post_text,
-                            pin_id=pin_id,
-                            pin_url=pin_url,
-                            image_path=verified_image_path,
-                            log_fn=log,
-                            live_frame_fn=live_frame_fn,
-                        )
-                        page_proof = page_res.get("screenshotPath")
-
-                    if destination in ["both", "group"]:
-                        log("info", f"👥 Step 5/7: Publishing Pin #{pin_idx} (ID: {pin_id}) to {FB_GROUP_NAME}...")
-                        group_res = await _publish_to_facebook_group(
-                            page=fb_action_page,
-                            post_text=post_text,
-                            pin_id=pin_id,
-                            pin_url=pin_url,
-                            image_path=verified_image_path,
-                            log_fn=log,
-                            live_frame_fn=live_frame_fn,
-                        )
-                        group_proof = group_res.get("screenshotPath")
-
-                    log("info", f"💾 Step 6/7: Recording deduplication & saving proof for Pin #{pin_idx}...")
-                    verified_path = group_proof or page_proof or ""
-                    ledger.record_facebook_share(
-                        pin_id=pin_id,
-                        pin_url=pin_url,
-                        title=pin_title,
-                        text=post_text,
-                        target=target_name,
-                        screenshot_path=verified_path,
-                        status="success",
-                    )
-                    remove_pin_from_cache(pin_id, pin_url)
-                    log("success", f"🎉 Step 7/7 complete: Pin {pin_id} successfully published to {target_name}! (Proof: {verified_path})")
-
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "success",
-                        "target": target_name,
-                        "destination": destination,
-                        "content": post_text,
-                        "imageUrl": pin_image_url,
-                        "imageVerified": img_checkpoint.get("verified", False),
-                        "screenshotPath": verified_path,
-                        "pageProof": page_proof,
-                        "groupProof": group_proof,
-                        "verified": True,
-                    })
-                    published_count += 1
-                except Exception as fe:
-                    err_msg = str(fe)
-                    log("error", f"❌ Facebook posting error for Pin #{pin_idx}: {err_msg}")
-                    ledger.record_facebook_share(
-                        pin_id=pin_id,
-                        pin_url=pin_url,
-                        title=pin_title,
-                        text=post_text if 'post_text' in locals() else "",
-                        target=target_name,
-                        screenshot_path="",
-                        status="failed",
-                        error_message=err_msg,
-                    )
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "failed",
-                        "error": err_msg,
-                    })
-                finally:
-                    if not fb_action_page.is_closed():
-                        try:
-                            await fb_action_page.close()
-                        except Exception:
-                            pass
-
-                # Only sleep if there are more pins remaining in explicit_pins
-                if pin_idx < total_explicit and delay_seconds > 0:
-                    log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next pin...")
-                    for _ in range(int(delay_seconds)):
-                        if should_stop_fn and should_stop_fn():
-                            break
-                        await asyncio.sleep(1)
-
-        scroll_attempt = 0
-        max_scroll_attempts = 50
-        consecutive_empty_scrolls = 0
-
-        while not explicit_pins and published_count < pin_count and scroll_attempt < max_scroll_attempts:
+        for deal_idx, deal_item in enumerate(explicit_deals, 1):
             if should_stop_fn and should_stop_fn():
-                log("warning", "⏹️ Stop requested by user. Finishing current Facebook share batch...")
+                log("warning", "⏹️ Stop requested by user. Finishing current Facebook batch and generating reports...")
                 break
-            log("info", f"📌 --- Scanning Pinterest Feed (Published: {published_count}/{pin_count} | Unique Pins Seen: {len(seen_pin_ids)}) ---")
 
-            # Locate all pin cards currently rendered in the DOM
-            pin_cards = await pinterest_page.query_selector_all('div[data-test-id="pin"]')
-            if not pin_cards:
-                pin_cards = await pinterest_page.query_selector_all('div[role="listitem"]:has(a[href*="/pin/"])')
-            if not pin_cards:
-                pin_cards = await pinterest_page.query_selector_all('div[role="listitem"]')
+            asin = str(deal_item.get("asin") or deal_item.get("pinId") or "").strip()
+            deal_url = str(deal_item.get("dealUrl") or deal_item.get("productUrl") or deal_item.get("pinUrl") or "").strip()
+            deal_title = str(deal_item.get("title") or f"Amazon Deal {asin}").strip()
+            deal_price = str(deal_item.get("price") or "").strip()
+            deal_orig_price = str(deal_item.get("originalPrice") or "").strip()
+            deal_discount = str(deal_item.get("discount") or "").strip()
+            deal_image_url = str(deal_item.get("imageUrl") or "").strip()
+            page_num = deal_item.get("pageNumber", start_page)
+            card_num = (deal_item.get("cardIndex", (deal_idx - 1) % 6)) + 1
 
-            discovered_in_batch = 0
-
-            for card in pin_cards:
-                if published_count >= pin_count:
-                    break
-
-                # Extract pin link, ID, title, price, and image URL
-                card_info = await card.evaluate("""(card) => {
-                    const a = card.querySelector('a[href*="/pin/"]');
-                    const href = a ? a.href : '';
-                    const m = href.match(/\\/pin\\/([0-9]+)/);
-                    const pinId = m ? m[1] : '';
-                    const aria = a ? (a.getAttribute('aria-label') || '') : '';
-                    let title = '';
-                    let price = '';
-                    if (aria) {
-                        const parts = aria.split('|').map(p => p.trim());
-                        if (parts.length >= 2) {
-                            title = parts[0];
-                            price = parts[1];
-                        } else {
-                            title = parts[0];
-                        }
-                    }
-                    const img = card.querySelector('img');
-                    if (!title) {
-                        title = img ? (img.alt || img.title || '') : '';
-                    }
-                    let imageUrl = '';
-                    if (img) {
-                        imageUrl = img.currentSrc || img.src || img.getAttribute('src') || '';
-                        if (imageUrl.includes('/236x/')) {
-                            imageUrl = imageUrl.replace('/236x/', '/736x/');
-                        } else if (imageUrl.includes('/474x/')) {
-                            imageUrl = imageUrl.replace('/474x/', '/736x/');
-                        }
-                    }
-                    title = title.replace('This contains an image of:', '').replace('Pin page', '').trim();
-                    return { href, pinId, title, price, imageUrl };
-                }""")
-
-                pin_id = card_info.get("pinId", "").strip()
-                pin_url = card_info.get("href", "").split("?")[0].strip()
-                if not pin_url and pin_id:
-                    pin_url = f"https://in.pinterest.com/pin/{pin_id}/"
-
-                if not pin_id or pin_id in seen_pin_ids:
-                    continue
-
-                seen_pin_ids.add(pin_id)
-                discovered_in_batch += 1
-                consecutive_empty_scrolls = 0
-
-                pin_idx = len(seen_pin_ids)
-                pin_title = card_info.get("title", "").strip() or f"Pinterest Deal {pin_id}"
-                pin_price = card_info.get("price", "").strip()
-                pin_image_url = card_info.get("imageUrl", "").strip()
-
-                log("info", f"🔍 Evaluating Pin #{pin_idx}: ID={pin_id} | Title: {pin_title[:50]}... ({pin_price})")
-
-                # If user selected specific pin IDs, only process matching pins if valid pin IDs provided
-                if specific_pin_ids and any(len(str(x)) >= 15 for x in specific_pin_ids):
-                    if pin_id not in specific_pin_ids:
-                        continue
-
-                # Isolated Deduplication Check strictly for Facebook
-                dedup_check = ledger.check_facebook_candidate(
-                    pin_id=pin_id,
-                    pin_url=pin_url,
-                    image_url=pin_image_url,
-                    title=pin_title,
-                )
-                if dedup_check["is_duplicate"]:
-                    log("info", f"⏩ Pin #{pin_idx} '{pin_title[:38]}' (ID: {pin_id}) is ALREADY on Facebook. Skipping to next unposted pin...")
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "skipped",
-                        "reason": dedup_check["reason"],
-                    })
-                    continue
-
-                # ──────────────────────────────────────────
-                # STEP 3: Hover Pin Card & Click Share ('Send') Icon
-                # ──────────────────────────────────────────
-                log("info", f"🖱️ Step 3/7: Hovering over Pin #{pin_idx} (ID: {pin_id}) to reveal Share details...")
-
-                # Ensure any lingering popover is dismissed before interacting with new pin
-                try:
-                    await pinterest_page.keyboard.press("Escape")
-                    await asyncio.sleep(0.4)
-                except Exception:
-                    pass
-
-                # Scroll target pin card into center of viewport using exact pin ID
-                try:
-                    await pinterest_page.evaluate("""(id) => {
-                        const card = document.querySelector(`div[data-test-pin-id="${id}"]`) 
-                                   || document.querySelector(`div[data-pin-drag-id="${id}"]`);
-                        if (card) {
-                            card.scrollIntoView({ behavior: "instant", block: "center" });
-                        }
-                    }""", pin_id)
-                    await asyncio.sleep(0.8)
-                except Exception:
-                    pass
-
-                # Target pin card using Playwright Locator (auto-retries, immune to detachment)
-                card_sel = f'div[data-test-pin-id="{pin_id}"], div[data-pin-drag-id="{pin_id}"]'
-                card_loc = pinterest_page.locator(card_sel).first
-                if await card_loc.count() == 0:
-                    log("warning", f"⚠️ Pin card {pin_id} not visible in DOM. Skipping.")
-                    continue
-
-                try:
-                    await card_loc.scroll_into_view_if_needed(timeout=6000)
-                    await card_loc.hover(timeout=5000)
-                    await asyncio.sleep(0.8)
-                except Exception:
-                    pass
-
-                await _take_screenshot(pinterest_page, f"fb_share_pin{pin_idx}_hovered.png")
-
-                # Locate Send button strictly inside target pin card using Locator
-                send_btn_loc = card_loc.locator('button[aria-label="Send"]').first
-                if await send_btn_loc.count() == 0:
-                    # Re-hover in case animation was slow
+            if ledger.is_posted_to_facebook(asin, deal_url, deal_title):
+                log("info", f"⏩ Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) is already posted to Facebook. Auto-clearing & skipping...")
+                remove_pin_from_cache(asin, deal_url)
+                if on_item_cleared_fn:
                     try:
-                        await card_loc.hover(timeout=3000)
-                        await asyncio.sleep(0.6)
+                        on_item_cleared_fn({
+                            "asin": asin,
+                            "pinId": asin,
+                            "title": deal_title,
+                            "pageNumber": page_num,
+                            "cardIndex": card_num - 1,
+                        })
+                    except Exception:
+                        pass
+                results.append({
+                    "pinIndex": deal_idx,
+                    "pinUrl": deal_url,
+                    "pinId": asin,
+                    "asin": asin,
+                    "title": deal_title,
+                    "price": deal_price,
+                    "discount": deal_discount,
+                    "status": "skipped",
+                    "reason": "Already posted to Facebook",
+                })
+                continue
+
+            log(
+                "info",
+                f"🔍 [Page {page_num} • Card #{card_num}/6] Deal #{deal_idx}/{total_to_process}: "
+                f"ASIN={asin} | {deal_title[:52]}... ({deal_price} • {deal_discount})",
+            )
+
+            # Spotlight this deal card on worldnewzs.in/amazon-products in the Live Browser
+            await _spotlight_deal_on_worldnewzs_page(
+                page=worldnewzs_page,
+                deal=deal_item,
+                idx=deal_idx,
+                total=total_to_process,
+                live_frame_fn=live_frame_fn,
+            )
+
+            if destination == "both":
+                target_name = f"{FB_PAGE_NAME} (Page Feed + Group)"
+            elif destination == "page":
+                target_name = f"{FB_PAGE_NAME} (Page Feed)"
+            else:
+                target_name = f"{FB_GROUP_NAME} (Group)"
+
+            # Step 3: Verify and pre-download high-res Amazon product image locally
+            log("info", f"📸 Step 3/7: Verifying high-res Amazon image & crafting deal copy for ASIN {asin} (Page {page_num}, Card #{card_num}/6)...")
+            img_checkpoint = await verify_and_download_pin_image(
+                pin_id=asin,
+                pin_url=deal_url,
+                image_url=deal_image_url,
+                log_fn=log,
+            )
+            verified_image_path = img_checkpoint.get("imagePath")
+            if img_checkpoint.get("imageUrl"):
+                deal_image_url = img_checkpoint["imageUrl"]
+
+            post_data = ContentShuffler.generate_post(deal_item, ledger)
+            post_text = post_data.get(
+                "text",
+                f"🔥 {deal_discount}! {deal_title}\n💰 Deal Price: {deal_price}\n\n🛒 Grab this deal: {deal_url}",
+            )
+            log("info", f"📝 Shuffled Amazon Copy: \"{post_text[:75].replace(chr(10), ' ')}...\"")
+
+            fb_action_page = await context.new_page()
+            try:
+                await install_visual_cursor(fb_action_page)
+                page_proof = None
+                group_proof = None
+
+                if destination in ["both", "page"]:
+                    log("info", f"📄 Step 4/7: Publishing Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) to WorldNewzs Facebook Page Feed...")
+                    page_res = await _publish_to_facebook_page(
+                        page=fb_action_page,
+                        post_text=post_text,
+                        pin_id=asin,
+                        pin_url=deal_url,
+                        image_path=verified_image_path,
+                        log_fn=log,
+                        live_frame_fn=live_frame_fn,
+                    )
+                    page_proof = page_res.get("screenshotPath")
+
+                if destination in ["both", "group"]:
+                    log("info", f"👥 Step 5/7: Publishing Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) to {FB_GROUP_NAME}...")
+                    group_res = await _publish_to_facebook_group(
+                        page=fb_action_page,
+                        post_text=post_text,
+                        pin_id=asin,
+                        pin_url=deal_url,
+                        image_path=verified_image_path,
+                        log_fn=log,
+                        live_frame_fn=live_frame_fn,
+                    )
+                    group_proof = group_res.get("screenshotPath")
+
+                log("info", f"💾 Step 6/7: Recording ASIN {asin} in DeduplicationLedger & auto-clearing from active queue...")
+                verified_path = group_proof or page_proof or ""
+                ledger.record_facebook_share(
+                    pin_id=asin,
+                    pin_url=deal_url,
+                    title=deal_title,
+                    text=post_text,
+                    target=target_name,
+                    screenshot_path=verified_path,
+                    status="success",
+                )
+                remove_pin_from_cache(asin, deal_url)
+                if on_item_cleared_fn:
+                    try:
+                        on_item_cleared_fn({
+                            "asin": asin,
+                            "pinId": asin,
+                            "title": deal_title,
+                            "pageNumber": page_num,
+                            "cardIndex": card_num - 1,
+                        })
                     except Exception:
                         pass
 
-                if await send_btn_loc.count() == 0:
-                    log("warning", f"⚠️ Share button not found inside Pin {pin_id} card. Skipping.")
-                    continue
-
-                try:
-                    await send_btn_loc.click(timeout=5000)
-                except Exception:
-                    # Direct evaluate click inside the card container
-                    await pinterest_page.evaluate(f"""(id) => {{
-                        const c = document.querySelector(`div[data-test-pin-id="${{id}}"], div[data-pin-drag-id="${{id}}"]`);
-                        if (c) {{
-                            const btn = c.querySelector('button[aria-label="Send"]');
-                            if (btn) btn.click();
-                        }}
-                    }}""", pin_id)
-
-                await asyncio.sleep(1.5)
-                await _take_screenshot(pinterest_page, f"fb_share_pin{pin_idx}_share_popover.png")
-                log("success", "✅ Step 3 complete — Pinterest Share popover opened and details captured!")
-
-                # Dismiss the Pinterest popover cleanly
-                try:
-                    await pinterest_page.keyboard.press("Escape")
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-
-                # Target name for deduplication ledger and reporting
-                if destination == "both":
-                    target_name = f"{FB_PAGE_NAME} (Page Feed + Group)"
-                elif destination == "page":
-                    target_name = f"{FB_PAGE_NAME} (Page Feed)"
-                else:
-                    target_name = f"{FB_GROUP_NAME} (Group)"
-
-                # Checkpoint: Verify and pre-download pin image locally
-                img_checkpoint = await verify_and_download_pin_image(
-                    pin_id=pin_id,
-                    pin_url=pin_url,
-                    image_url=pin_image_url,
-                    log_fn=log,
+                log(
+                    "success",
+                    f"🎉 Step 7/7 complete: Amazon Deal {asin} (Page {page_num} Card #{card_num}/6) published to {target_name} & auto-cleared!",
                 )
-                verified_image_path = img_checkpoint.get("imagePath")
-                if img_checkpoint.get("imageUrl"):
-                    pin_image_url = img_checkpoint["imageUrl"]
 
-                # Generate unique shuffled copy using ContentShuffler
-                deal_info = {
-                    "id": pin_id,
-                    "title": pin_title,
-                    "truncatedTitle": pin_title[:50],
-                    "pinUrl": pin_url,
-                    "shareUrl": pin_url,
-                    "price": pin_price,
-                    "discount": "",
-                    "category": "general",
-                    "imageUrl": pin_image_url,
-                }
-                post_data = ContentShuffler.generate_post(deal_info, ledger)
-                post_text = post_data.get("text", f"📌 Check out this hot deal on Pinterest: {pin_title}\n\n{pin_url}")
-                log("info", f"📝 Shuffled Copy: \"{post_text[:70]}...\"")
-
-                # ──────────────────────────────────────────
-                # STEP 4-7: Publish to Configured Facebook Destinations
-                # ──────────────────────────────────────────
-                fb_action_page = await context.new_page()
-                try:
-                    page_proof = None
-                    group_proof = None
-
-                    # Destination 1: WorldNewzs Facebook Page Feed
-                    if destination in ["both", "page"]:
-                        log("info", f"📄 Step 4/7: Publishing Pin #{pin_idx} (ID: {pin_id}) to WorldNewzs Facebook Page Feed...")
-                        page_res = await _publish_to_facebook_page(
-                            page=fb_action_page,
-                            post_text=post_text,
-                            pin_id=pin_id,
-                            pin_url=pin_url,
-                            image_path=verified_image_path,
-                            log_fn=log,
-                            live_frame_fn=live_frame_fn,
-                        )
-                        page_proof = page_res.get("screenshotPath")
-
-                    # Destination 2: Amazon Affiliate Group
-                    if destination in ["both", "group"]:
-                        log("info", f"👥 Step 5/7: Publishing Pin #{pin_idx} (ID: {pin_id}) to {FB_GROUP_NAME}...")
-                        group_res = await _publish_to_facebook_group(
-                            page=fb_action_page,
-                            post_text=post_text,
-                            pin_id=pin_id,
-                            pin_url=pin_url,
-                            image_path=verified_image_path,
-                            log_fn=log,
-                            live_frame_fn=live_frame_fn,
-                        )
-                        group_proof = group_res.get("screenshotPath")
-
-                    log("info", f"💾 Step 6/7: Recording deduplication & saving proof for Pin #{pin_idx}...")
-                    verified_path = page_proof or group_proof or ""
-                    ledger.record_facebook_share(
-                        pin_id=pin_id,
-                        pin_url=pin_url,
-                        title=pin_title,
-                        text=post_text,
-                        target=target_name,
-                        screenshot_path=verified_path,
-                        status="success",
-                    )
-                    remove_pin_from_cache(pin_id, pin_url)
-                    log("success", f"🎉 Step 7/7 complete: Pin {pin_id} successfully published to {target_name}! (Proof: {verified_path})")
-
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "success",
-                        "target": target_name,
-                        "destination": destination,
-                        "content": post_text,
-                        "imageUrl": pin_image_url,
-                        "imageVerified": img_checkpoint.get("verified", False),
-                        "screenshotPath": verified_path,
-                        "pageProof": page_proof,
-                        "groupProof": group_proof,
-                        "verified": True,
-                    })
-                    published_count += 1
-
-                except Exception as fe:
-                    err_msg = str(fe)
-                    log("error", f"❌ Facebook posting error for Pin #{pin_idx}: {err_msg}")
-                    ledger.record_facebook_share(
-                        pin_id=pin_id,
-                        pin_url=pin_url,
-                        title=pin_title,
-                        text=post_text if 'post_text' in locals() else "",
-                        target=target_name,
-                        screenshot_path="",
-                        status="failed",
-                        error_message=err_msg,
-                    )
-                    results.append({
-                        "pinIndex": pin_idx,
-                        "pinUrl": pin_url,
-                        "pinId": pin_id,
-                        "title": pin_title,
-                        "status": "failed",
-                        "error": err_msg,
-                    })
-                finally:
-                    if not fb_action_page.is_closed():
-                        try:
-                            await fb_action_page.close()
-                        except Exception:
-                            pass
-                    # Dismiss any remaining Pinterest popover
+                results.append({
+                    "pinIndex": deal_idx,
+                    "pinUrl": deal_url,
+                    "dealUrl": deal_url,
+                    "pinId": asin,
+                    "asin": asin,
+                    "title": deal_title,
+                    "price": deal_price,
+                    "originalPrice": deal_orig_price,
+                    "discount": deal_discount,
+                    "pageNumber": page_num,
+                    "cardNumber": card_num,
+                    "status": "success",
+                    "target": target_name,
+                    "destination": destination,
+                    "content": post_text,
+                    "imageUrl": deal_image_url,
+                    "imageVerified": img_checkpoint.get("verified", False),
+                    "screenshotPath": verified_path,
+                    "pageProof": page_proof,
+                    "groupProof": group_proof,
+                    "verified": True,
+                })
+                published_count += 1
+            except Exception as fe:
+                err_msg = str(fe)
+                log("error", f"❌ Facebook posting error for Deal #{deal_idx} (ASIN {asin}): {err_msg}")
+                ledger.record_facebook_share(
+                    pin_id=asin,
+                    pin_url=deal_url,
+                    title=deal_title,
+                    text=post_text if "post_text" in locals() else "",
+                    target=target_name,
+                    screenshot_path="",
+                    status="failed",
+                    error_message=err_msg,
+                )
+                results.append({
+                    "pinIndex": deal_idx,
+                    "pinUrl": deal_url,
+                    "dealUrl": deal_url,
+                    "pinId": asin,
+                    "asin": asin,
+                    "title": deal_title,
+                    "price": deal_price,
+                    "status": "failed",
+                    "error": err_msg,
+                })
+            finally:
+                if not fb_action_page.is_closed():
                     try:
-                        await pinterest_page.keyboard.press("Escape")
-                        await asyncio.sleep(0.5)
+                        await fb_action_page.close()
                     except Exception:
                         pass
 
-                # Pacing delay between successfully published pins
-                if published_count < pin_count and delay_seconds > 0:
-                    log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next pin...")
-                    for _ in range(int(delay_seconds)):
-                        if should_stop_fn and should_stop_fn():
-                            break
-                        await asyncio.sleep(1)
-
-            # If more pins are needed, scroll down to load more pins from the account
-            if published_count < pin_count:
-                scroll_attempt += 1
-                if discovered_in_batch == 0:
-                    consecutive_empty_scrolls += 1
-                log("info", f"📜 Scrolling down Pinterest feed to discover more unposted pins (scroll {scroll_attempt}/{max_scroll_attempts}, scanned {len(seen_pin_ids)} unique pins, posted {published_count}/{pin_count})...")
-                await pinterest_page.evaluate("window.scrollBy(0, 1500)")
-                await asyncio.sleep(3)
-
-                if consecutive_empty_scrolls >= 10:
-                    log("warning", f"⚠️ Reached the end of Pinterest pins feed ({len(seen_pin_ids)} unique pins checked). Stopping.")
-                    break
+            if deal_idx < total_to_process and delay_seconds > 0:
+                log("info", f"⏳ Anti-spam pacing: sleeping {delay_seconds}s before next Amazon product...")
+                for _ in range(int(delay_seconds)):
+                    if should_stop_fn and should_stop_fn():
+                        break
+                    await asyncio.sleep(1)
 
     finally:
-        if not pinterest_page.is_closed():
-            await pinterest_page.close()
+        if not worldnewzs_page.is_closed():
+            try:
+                await worldnewzs_page.close()
+            except Exception:
+                pass
 
     success_cnt = sum(1 for r in results if r.get("status") == "success")
     skip_cnt = sum(1 for r in results if r.get("status") == "skipped")
     fail_cnt = sum(1 for r in results if r.get("status") == "failed")
     duration_sec = int(time.time() - start_time)
 
+    # Automatically purge all posted Facebook deals from the active queue upon batch completion
+    clean_summary = clean_posted_pins_from_cache(ledger)
+    log(
+        "success",
+        f"🧹 Auto-Cleared Posted Facebook Deals: {clean_summary.get('cleanedCount', 0)} total posted deals cleared from active queue ({clean_summary.get('remainingCount', 0)} unposted deals remaining).",
+    )
+
     summary = {
-        "totalPins": pin_count,
+        "totalPins": total_to_process,
         "totalShared": success_cnt,
         "sharedCount": success_cnt,
         "successCount": success_cnt,
         "skippedCount": skip_cnt,
         "failedCount": fail_cnt,
         "durationSeconds": duration_sec,
+        "cleanedCount": clean_summary.get("cleanedCount", 0),
+        "remainingCount": clean_summary.get("remainingCount", 0),
     }
 
-    # Generate Excel live proof report
     excel_info = {}
     try:
         excel_info = export_facebook_shares_excel(results)
@@ -1655,7 +1507,6 @@ async def execute_pinterest_facebook_share(
     except Exception as ee:
         log("error", f"Excel export note: {ee}")
 
-    # Generate PDF activity report
     pdf_info = {}
     try:
         pdf_info = generate_facebook_pdf_report(results, summary)
@@ -1663,17 +1514,22 @@ async def execute_pinterest_facebook_share(
     except Exception as pe:
         log("error", f"PDF report note: {pe}")
 
-    log("success", f"🏁 Batch Completed! Success: {success_cnt}/{pin_count} | Skipped: {skip_cnt} | Failed: {fail_cnt} (Duration: {duration_sec}s)")
+    log(
+        "success",
+        f"🏁 Batch Completed! Success: {success_cnt}/{total_to_process} | Skipped: {skip_cnt} | Failed: {fail_cnt} (Duration: {duration_sec}s)",
+    )
 
     return {
         "success": success_cnt > 0 or (success_cnt == 0 and skip_cnt > 0),
-        "totalPins": pin_count,
+        "totalPins": total_to_process,
         "totalShared": success_cnt,
         "sharedCount": success_cnt,
         "successCount": success_cnt,
         "skippedCount": skip_cnt,
         "failedCount": fail_cnt,
         "durationSeconds": duration_sec,
+        "cleanedCount": clean_summary.get("cleanedCount", 0),
+        "remainingCount": clean_summary.get("remainingCount", 0),
         "excelReport": excel_info,
         "pdfReport": pdf_info,
         "results": results,
@@ -1681,7 +1537,7 @@ async def execute_pinterest_facebook_share(
 
 
 def remove_pin_from_cache(pin_id: str, pin_url: str = ""):
-    """Removes a specific pin from DHANVI_PINS_CACHE upon posting."""
+    """Removes a specific product/pin from DHANVI_PINS_CACHE upon posting."""
     if not os.path.exists(DHANVI_PINS_CACHE):
         return
     try:
@@ -1691,199 +1547,100 @@ def remove_pin_from_cache(pin_id: str, pin_url: str = ""):
             p_id_str = str(pin_id).strip()
             p_url_str = str(pin_url).strip()
             filtered = [
-                p for p in pins
-                if str(p.get("pinId", "")).strip() != p_id_str and str(p.get("pinUrl", "")).strip() != p_url_str
+                p
+                for p in pins
+                if str(p.get("pinId") or p.get("asin") or "").strip() != p_id_str
+                and str(p.get("pinUrl") or p.get("dealUrl") or "").strip() != p_url_str
             ]
             if len(filtered) != len(pins):
                 with open(DHANVI_PINS_CACHE, "w", encoding="utf-8") as f:
                     json.dump(filtered, f, indent=2, ensure_ascii=False)
-                _safe_print(f"[Remove Pin Cache] Removed pin {p_id_str} from cache. Remaining: {len(filtered)}")
+                _safe_print(f"[Auto-Clear Cache] Removed posted product {p_id_str} from cache. Remaining: {len(filtered)}")
     except Exception as e:
-        _safe_print(f"[Remove Pin From Cache Error] {e}")
+        _safe_print(f"[Remove Product From Cache Error] {e}")
 
 
 def clean_posted_pins_from_cache(ledger: Optional[DeduplicationLedger] = None) -> Dict[str, Any]:
     """
-    Purges all pins from DHANVI_PINS_CACHE that have already been posted to Facebook.
-    Ensures that posted pins never show up in the Facebook Automation Hub.
+    Purges all already-posted products from the active Facebook Automation Hub queue
+    and returns accurate counts of cleaned (posted) vs remaining (unposted) WorldNewzs Amazon products.
     """
     if ledger is None:
         ledger = DeduplicationLedger()
+    else:
+        ledger.ensure_fresh()
 
-    if not os.path.exists(DHANVI_PINS_CACHE):
-        return {"cleanedCount": 0, "remainingCount": 0, "totalBefore": 0}
+    queue_info = get_unposted_facebook_deals(page_number=1, page_size=6, ledger=ledger, force_sync=False)
+    cleaned_count = queue_info.get("postedCount", 0)
+    remaining_count = queue_info.get("pendingCount", 0)
+    total_before = queue_info.get("totalCatalog", cleaned_count + remaining_count)
 
-    try:
-        with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
-            cached_data = json.load(f)
-    except Exception as e:
-        _safe_print(f"[Clean Cache Error] Failed to read cache: {e}")
-        return {"cleanedCount": 0, "remainingCount": 0, "totalBefore": 0}
-
-    if not isinstance(cached_data, list):
-        return {"cleanedCount": 0, "remainingCount": 0, "totalBefore": 0}
-
-    total_before = len(cached_data)
-    unposted_pins = []
-    removed_pins = []
-
-    for p in cached_data:
-        p_id = str(p.get("pinId") or p.get("id") or "").strip()
-        p_url = p.get("pinUrl") or p.get("href") or f"https://in.pinterest.com/pin/{p_id}/" if p_id else ""
-        if ledger.is_posted_to_facebook(p_id, p_url):
-            removed_pins.append(p_id)
-        else:
-            unposted_pins.append(p)
-
-    cleaned_count = len(removed_pins)
-
-    if cleaned_count > 0:
+    # Also keep DHANVI_PINS_CACHE synchronized if present
+    if os.path.exists(DHANVI_PINS_CACHE):
         try:
-            with open(DHANVI_PINS_CACHE, "w", encoding="utf-8") as f:
-                json.dump(unposted_pins, f, indent=2, ensure_ascii=False)
-            _safe_print(f"[Clean Cache] Successfully purged {cleaned_count} posted pins from cache. {len(unposted_pins)} unposted pins remain.")
-        except Exception as e:
-            _safe_print(f"[Clean Cache Error] Failed to write back cleaned cache: {e}")
+            with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
+                cached_data = json.load(f)
+            if isinstance(cached_data, list):
+                unposted = [
+                    p
+                    for p in cached_data
+                    if not ledger.is_posted_to_facebook(
+                        str(p.get("asin") or p.get("pinId") or "").strip(),
+                        str(p.get("dealUrl") or p.get("pinUrl") or "").strip(),
+                        str(p.get("title") or p.get("name") or "").strip(),
+                    )
+                ]
+                with open(DHANVI_PINS_CACHE, "w", encoding="utf-8") as f:
+                    json.dump(unposted, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
     return {
         "cleanedCount": cleaned_count,
-        "remainingCount": len(unposted_pins),
+        "remainingCount": remaining_count,
         "totalBefore": total_before,
     }
 
 
 async def harvest_dhanvi_collection_pins(
-    max_pins: int = 200,
+    max_pins: int = 3000,
     force_live: bool = False,
     log_fn: Optional[Callable[[str, str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Returns pins available in Dhanvi Collection annotated with Facebook status.
-    Automatically purges and excludes any pins already posted to Facebook so they never show up.
+    Returns newly added / unposted Amazon products from worldnewzs.in/amazon-products.
+    Automatically excludes any products already posted to Facebook so they are auto-cleared.
     """
     ledger = DeduplicationLedger()
-    os.makedirs(os.path.dirname(DHANVI_PINS_CACHE), exist_ok=True)
-
-    # Clean any already-posted pins from local cache first
-    clean_posted_pins_from_cache(ledger)
-
-    def _annotate(pins_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        annotated = []
-        for p in pins_list:
-            p_id = str(p.get("pinId") or p.get("id") or "").strip()
-            p_url = p.get("pinUrl") or p.get("href") or f"https://in.pinterest.com/pin/{p_id}/" if p_id else ""
-            if ledger.is_posted_to_facebook(p_id, p_url):
-                continue  # Never include posted pins in Facebook Automation Hub!
-            img_url = (p.get("imageUrl") or "").strip()
-            if img_url:
-                img_url = img_url.replace("/236x/", "/736x/").replace("/474x/", "/736x/")
-            annotated.append({
-                "pinId": p_id,
-                "title": p.get("title") or "Pinterest Deal",
-                "price": p.get("price") or "",
-                "pinUrl": p_url,
-                "imageUrl": img_url,
-                "status": "pending",
-                "statusLabel": "Ready to Post",
-            })
-        return annotated
-
-    # Check cache if live refresh not forced
-    if not force_live and os.path.exists(DHANVI_PINS_CACHE):
+    if force_live:
         try:
-            with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
-                cached_data = json.load(f)
-                if cached_data and len(cached_data) > 0:
-                    return _annotate(cached_data)
-        except Exception:
-            pass
+            sync_live_products()
+        except Exception as e:
+            _safe_print(f"[WorldNewzs Live Sync Note] {e}")
 
-    # Live harvest from Pinterest if requested or cache missing
-    live_pins = []
-    try:
-        ctx = await get_browser_context()
-        page = await ctx.new_page()
-        try:
-            await safe_goto(page, PINTEREST_CREATED_URL, timeout=45000)
-            await asyncio.sleep(3.5)
-            all_discovered = {}
-            for _ in range(25):
-                batch = await page.evaluate('''() => {
-                    const results = [];
-                    const anchors = Array.from(document.querySelectorAll('a[href*="/pin/"]'));
-                    for (const a of anchors) {
-                        const href = a.href || '';
-                        const m = href.match(/\\/pin\\/(\\d+)/);
-                        if (m) {
-                            const pinId = m[1];
-                            const container = a.closest('div[role="listitem"], div[data-test-id="pin"]') || a.parentElement;
-                            const img = container?.querySelector('img') || a.querySelector('img');
-                            let rawTitle = a.getAttribute('aria-label') || img?.alt || a.innerText || '';
-                            let title = rawTitle;
-                            let price = '';
-                            if (rawTitle.includes('|')) {
-                                const parts = rawTitle.split('|').map(s => s.trim());
-                                title = parts[0];
-                                price = parts[1] || '';
-                            }
-                            title = title.replace('This contains an image of:', '').replace('Pin page', '').trim();
-                            let imageUrl = '';
-                            if (img) {
-                                imageUrl = img.currentSrc || img.src || img.getAttribute('src') || '';
-                                if (!imageUrl && img.srcset) {
-                                    const parts = img.srcset.split(',').map(s => s.trim().split(' ')[0]);
-                                    imageUrl = parts[parts.length - 1] || '';
-                                }
-                            }
-                            if (imageUrl.includes('/236x/')) imageUrl = imageUrl.replace('/236x/', '/736x/');
-                            else if (imageUrl.includes('/474x/')) imageUrl = imageUrl.replace('/474x/', '/736x/');
+    products = load_products_dataset(force_refresh=force_live)
+    unposted_deals: List[Dict[str, Any]] = []
+    seen_asins = set()
 
-                            results.push({
-                                pinId: pinId,
-                                pinUrl: "https://in.pinterest.com/pin/" + pinId + "/",
-                                title: title || ("Pinterest Pin " + pinId),
-                                price: price,
-                                imageUrl: imageUrl
-                            });
-                        }
-                    }
-                    return results;
-                }''')
-                for p in batch:
-                    # Skip any pins already posted to Facebook
-                    if ledger.is_posted_to_facebook(p["pinId"], p.get("pinUrl", "")):
-                        continue
-                    if p["pinId"] not in all_discovered:
-                        all_discovered[p["pinId"]] = p
-                if len(all_discovered) >= max_pins:
-                    break
-                await page.evaluate("window.scrollBy(0, 1500)")
-                await asyncio.sleep(1.8)
-            live_pins = list(all_discovered.values())
-        finally:
-            if not page.is_closed():
-                await page.close()
-    except Exception as e:
-        _safe_print(f"[Harvest Pins Error] {e}")
+    for p in products:
+        asin = str(p.get("asin") or "").strip()
+        p_url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+        p_title = str(p.get("title") or p.get("name") or "").strip()
+        if not asin or asin in seen_asins:
+            continue
+        seen_asins.add(asin)
 
-    if live_pins:
-        try:
-            with open(DHANVI_PINS_CACHE, "w", encoding="utf-8") as f:
-                json.dump(live_pins, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-        return _annotate(live_pins)
+        if ledger.is_posted_to_facebook(asin, p_url, p_title):
+            continue
 
-    # Fallback to existing cache if available
-    if os.path.exists(DHANVI_PINS_CACHE):
-        try:
-            with open(DHANVI_PINS_CACHE, "r", encoding="utf-8", errors="replace") as f:
-                cached = json.load(f)
-                if cached:
-                    return _annotate(cached)
-        except Exception:
-            pass
+        idx_in_unposted = len(unposted_deals)
+        page_num = (idx_in_unposted // 6) + 1
+        card_idx = idx_in_unposted % 6
+        deal = format_amazon_product_card(p, idx=card_idx, page_number=page_num, serial_number=idx_in_unposted + 1)
+        unposted_deals.append(deal)
+        if len(unposted_deals) >= max_pins:
+            break
 
-    return []
+    return unposted_deals
 
 

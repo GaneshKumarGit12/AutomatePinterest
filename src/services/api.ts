@@ -208,13 +208,15 @@ export const api = {
     return res.data;
   },
 
-  // Pinterest → Facebook Page & Group Share
+  // WorldNewzs Amazon Products → Facebook Page & Group Share
   pinterestFacebookShare: async (payload: {
     pinCount: number;
     delaySeconds: number;
     targetBoardUrl?: string;
     specificPinIds?: string[];
     destination?: 'both' | 'page' | 'group';
+    startPage?: number;
+    endPage?: number;
   }) => {
     await ensureApiBase();
     const res = await client.post('/api/social/pinterest-facebook-share', payload);
@@ -238,10 +240,10 @@ export const api = {
     return res.data;
   },
 
-  // Get lazy-loadable Pinterest pins from Dhanvi Collection
+  // Get newly added / unposted Amazon products from worldnewzs.in/amazon-products (6 per page)
   getFacebookPins: async (
     page: number = 1,
-    pageSize: number = 12,
+    pageSize: number = 6,
     filter: string = 'pending',
     forceRefresh: boolean = false
   ) => {

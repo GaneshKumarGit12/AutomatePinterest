@@ -50,18 +50,30 @@ interface SocialMediaHubProps {
 }
 
 export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
-  // Dhanvi Collection Pinterest Pins State
+  // WorldNewzs Amazon Products (6 per page, unposted only)
   const [dhanviPins, setDhanviPins] = useState<Array<{
     pinId: string;
+    asin?: string;
     title: string;
     price: string;
+    originalPrice?: string;
+    discount?: string;
+    category?: string;
+    tag?: string;
     pinUrl: string;
+    dealUrl?: string;
+    destinationLink?: string;
     imageUrl: string;
+    pageNumber?: number;
+    cardIndex?: number;
+    cardIndexOnPage?: number;
+    serialNumber?: number;
     status: 'posted' | 'pending';
     statusLabel: string;
   }>>([]);
   const [pinPage, setPinPage] = useState<number>(1);
-  const [pinPageSize] = useState<number>(12);
+  const [endPage, setEndPage] = useState<number>(1);
+  const [pinPageSize] = useState<number>(6);
   const [pinTotalPages, setPinTotalPages] = useState<number>(1);
   const [pinTotalCount, setPinTotalCount] = useState<number>(0);
   const [pinFilter, setPinFilter] = useState<'pending' | 'all'>('pending');
@@ -69,10 +81,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   const [postedCount, setPostedCount] = useState<number>(0);
   const [isLoadingPins, setIsLoadingPins] = useState<boolean>(false);
   const [isCleaning, setIsCleaning] = useState<boolean>(false);
+  const [isSyncingWorldNewzs, setIsSyncingWorldNewzs] = useState<boolean>(false);
   const [selectedPinIds, setSelectedPinIds] = useState<Set<string>>(new Set());
 
   // Automation Execution State
-  const [fbSharePinCount, setFbSharePinCount] = useState<number>(10);
+  const [fbSharePinCount, setFbSharePinCount] = useState<number>(6);
   const [fbShareDelay, setFbShareDelay] = useState<number>(60);
   const [fbDestination, setFbDestination] = useState<'both' | 'page' | 'group'>('both');
   const [isFbShareRunning, setIsFbShareRunning] = useState<boolean>(false);
@@ -80,8 +93,9 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   const [statusMessage, setStatusMessage] = useState<{ text: string; severity: 'info' | 'success' | 'warning' | 'error' } | null>(null);
   const [socialLogs, setSocialLogs] = useState<Array<{ level: string; message: string; timestamp: string }>>([]);
 
-  // Modals
+  // Modals & Live Monitor
   const [liveBrowserFrame, setLiveBrowserFrame] = useState<string | null>(null);
+  const [showInlineLiveMonitor, setShowInlineLiveMonitor] = useState<boolean>(true);
   const [liveBrowserModalOpen, setLiveBrowserModalOpen] = useState<boolean>(false);
   const [completedModalOpen, setCompletedModalOpen] = useState<boolean>(false);
   const [lastBatchResult, setLastBatchResult] = useState<any>(null);
@@ -91,20 +105,37 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
 
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const wasRunningRef = useRef<boolean>(false);
+  const pinPageRef = useRef<number>(pinPage);
+  const pinFilterRef = useRef<'pending' | 'all'>(pinFilter);
 
-  const fetchDhanviPins = async (page = pinPage, filter = pinFilter, forceRefresh = false) => {
+  useEffect(() => {
+    pinPageRef.current = pinPage;
+  }, [pinPage]);
+
+  useEffect(() => {
+    pinFilterRef.current = pinFilter;
+  }, [pinFilter]);
+
+  const fetchDhanviPins = async (page = pinPageRef.current, filter = pinFilterRef.current, forceRefresh = false) => {
     setIsLoadingPins(true);
     try {
       const data = await api.getFacebookPins(page, pinPageSize, filter, forceRefresh);
-      if (data && data.pins) {
-        setDhanviPins(data.pins);
-        setPinTotalPages(data.totalPages || 1);
+      if (data && (data.pins || data.deals)) {
+        const list = data.pins || data.deals || [];
+        setDhanviPins(list);
+        const totPages = data.totalPages || 1;
+        setPinTotalPages(totPages);
         setPinTotalCount(data.totalCount || 0);
         setPendingCount(data.pendingCount || 0);
         setPostedCount(data.postedCount || 0);
+        if (data.page && data.page !== page) {
+          setPinPage(data.page);
+          pinPageRef.current = data.page;
+          setEndPage((prev) => Math.max(data.page, Math.min(prev, totPages)));
+        }
       }
     } catch (e) {
-      console.error('Error fetching Dhanvi pins:', e);
+      console.error('Error fetching WorldNewzs Amazon products for Facebook Hub:', e);
     } finally {
       setIsLoadingPins(false);
     }
@@ -117,7 +148,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     } catch (_) {}
   };
 
-  const handleBatchComplete = (batchData: any) => {
+  const handleBatchComplete = async (batchData: any) => {
     if (batchData) {
       setLastBatchResult(batchData);
       if (batchData.runId) {
@@ -132,18 +163,24 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     setCompletedModalOpen(true);
     setSelectedPinIds(new Set());
     setStatusMessage({
-      text: `🎉 Pinterest → Facebook Share completed! Published ${batchData?.successCount ?? batchData?.totalShared ?? 'all'} pin(s) to WorldNewzs Page & Amazon Affiliate Group.`,
+      text: `🎉 WorldNewzs Amazon Products → Facebook Share completed! Published ${batchData?.successCount ?? batchData?.totalShared ?? 'all'} product(s) to WorldNewzs Page & Amazon Affiliate Group. All posted items have been automatically cleared from the active queue.`,
       severity: 'success',
     });
-    api.cleanPostedPins().catch(() => {});
-    fetchDhanviPins(1, undefined, true);
-    fetchHistory();
+    try {
+      await api.cleanPostedPins();
+    } catch (_) {}
+    await fetchDhanviPins(pinPageRef.current, pinFilterRef.current, false);
+    await fetchHistory();
   };
 
   const checkFbShareStatus = async () => {
     try {
       const status = await api.getPinterestFacebookStatus();
       if (!status) return;
+
+      if (status.lastLiveFrameUrl) {
+        setLiveBrowserFrame(status.lastLiveFrameUrl);
+      }
 
       if (Array.isArray(status.recentLogs) && status.recentLogs.length > 0) {
         setSocialLogs((prev) => {
@@ -157,13 +194,40 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         });
       }
 
+      // Also auto-clear any completed/skipped ASINs reported in status poll
+      const pollClearedSet = new Set<string>();
+      if (Array.isArray(status.clearedAsins)) {
+        status.clearedAsins.forEach((a: any) => {
+          if (a) pollClearedSet.add(String(a).trim().toUpperCase());
+        });
+      }
+      if (Array.isArray(status.results)) {
+        status.results.forEach((r: any) => {
+          if (r && (r.status === 'success' || r.status === 'skipped')) {
+            const key = String(r.asin || r.pinId || '').trim().toUpperCase();
+            if (key) pollClearedSet.add(key);
+          }
+        });
+      }
+      if (pollClearedSet.size > 0) {
+        setDhanviPins((prev) => {
+          const next = prev.filter(
+            (p) => !pollClearedSet.has(String(p.asin || p.pinId || '').trim().toUpperCase())
+          );
+          if (prev.length > 0 && next.length === 0) {
+            setTimeout(() => fetchDhanviPins(pinPageRef.current, pinFilterRef.current, false), 150);
+          }
+          return next;
+        });
+      }
+
       if (status.isRunning) {
         wasRunningRef.current = true;
         setIsFbShareRunning(true);
         if (status.currentStep) {
           setFbShareStep({
             step: status.currentStep,
-            message: status.lastStepMessage || `Processing Pin #${status.currentPin || 1}/${status.totalPins || 1}...`,
+            message: status.lastStepMessage || `Processing Deal #${status.currentPin || 1}/${status.totalPins || 6}...`,
           });
         }
       } else {
@@ -177,7 +241,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         const latestRunId = status.lastBatchResult?.runId ? String(status.lastBatchResult.runId) : null;
 
         if (wasRunningRef.current) {
-          handleBatchComplete(status.lastBatchResult || {
+          await handleBatchComplete(status.lastBatchResult || {
             totalShared: status.results?.filter((r: any) => r.status === 'success').length || fbSharePinCount,
             successCount: status.results?.filter((r: any) => r.status === 'success').length || fbSharePinCount,
             skippedCount: status.results?.filter((r: any) => r.status === 'skipped').length || 0,
@@ -186,7 +250,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             pdfReport: status.lastPdfReport,
           });
         } else if (latestRunId && latestRunId !== ackRunId && status.lastBatchResult) {
-          handleBatchComplete(status.lastBatchResult);
+          await handleBatchComplete(status.lastBatchResult);
         } else {
           setIsFbShareRunning(false);
           setFbShareStep(null);
@@ -200,6 +264,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
 
   useEffect(() => {
     fetchDhanviPins(pinPage, pinFilter);
+    setEndPage((prev) => (prev < pinPage ? pinPage : prev));
   }, [pinPage, pinFilter]);
 
   useEffect(() => {
@@ -218,6 +283,23 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
       sseClient.subscribe('fb_live_frame', (data: any) => {
         if (data.url) {
           setLiveBrowserFrame(data.url);
+        }
+      }),
+      sseClient.subscribe('fb_item_cleared', (data: any) => {
+        const clearedAsin = String(data?.asin || data?.pinId || '').trim().toUpperCase();
+        if (clearedAsin) {
+          setDhanviPins((prev) => {
+            const next = prev.filter(
+              (p) => String(p.asin || p.pinId || '').trim().toUpperCase() !== clearedAsin
+            );
+            if (prev.length > 0 && next.length === 0) {
+              setTimeout(() => fetchDhanviPins(pinPageRef.current, pinFilterRef.current, false), 150);
+            }
+            return next;
+          });
+          setPendingCount((c) => Math.max(0, c - 1));
+          setPinTotalCount((c) => Math.max(0, c - 1));
+          setPostedCount((c) => c + 1);
         }
       }),
       sseClient.subscribe('fb_share_complete', (data: any) => {
@@ -250,48 +332,92 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     setSelectedPinIds(next);
   };
 
-  const handleSelect10Unposted = () => {
-    const pendingPins = dhanviPins.filter((p) => p.status === 'pending');
-    const first10 = pendingPins.slice(0, 10).map((p) => p.pinId);
-    setSelectedPinIds(new Set(first10));
-    setFbSharePinCount(first10.length > 0 ? first10.length : 10);
+  const handleSelectCurrentPage6 = () => {
+    const pageIds = dhanviPins.map((p) => p.asin || p.pinId);
+    setSelectedPinIds(new Set(pageIds));
+    setFbSharePinCount(pageIds.length > 0 ? pageIds.length : 6);
     setStatusMessage({
-      text: `✅ Selected ${first10.length} pending pin(s) from Dhanvi Collections. Click "Share to Facebook" to begin!`,
+      text: `✅ Selected all ${pageIds.length} newly added Amazon product(s) on Page ${pinPage}. Click "Share to Facebook" to begin!`,
       severity: 'info',
     });
   };
 
-  const handlePinterestFacebookShare = async () => {
-    if (isFbShareRunning) return;
-    wasRunningRef.current = true;
-    setIsFbShareRunning(true);
-    setFbShareStep({ step: 1, message: 'Verifying Facebook session & WorldNewzs Page identity...' });
-    const countToShare =
-      selectedPinIds.size > 0
-        ? selectedPinIds.size
-        : fbSharePinCount === 0
-        ? Math.max(1, pendingCount)
-        : fbSharePinCount;
-    const destLabel = fbDestination === 'both' ? 'WorldNewzs Page & Group' : fbDestination === 'page' ? 'WorldNewzs Page Feed' : 'Amazon Affiliate Group';
+  const handleSyncWorldNewzsDeals = async () => {
+    if (isSyncingWorldNewzs || isFbShareRunning) return;
+    setIsSyncingWorldNewzs(true);
     setStatusMessage({
-      text: `🚀 Starting Pinterest → Facebook Share (${countToShare} unposted pin(s) to ${destLabel}, ${fbShareDelay}s delay)...`,
+      text: '🔄 Syncing newly added Amazon.in products from worldnewzs.in/amazon-products...',
       severity: 'info',
     });
     try {
-      const specificIds = selectedPinIds.size > 0 ? Array.from(selectedPinIds) : undefined;
+      await api.syncDeals();
+      await fetchDhanviPins(1, pinFilter, true);
+      setPinPage(1);
+      setEndPage(1);
+      setStatusMessage({
+        text: '✅ Synced latest Amazon.in products from worldnewzs.in/amazon-products! Showing 6 unposted deals per page.',
+        severity: 'success',
+      });
+    } catch (err: any) {
+      setStatusMessage({
+        text: `Sync note: ${err.message || err}`,
+        severity: 'warning',
+      });
+    } finally {
+      setIsSyncingWorldNewzs(false);
+    }
+  };
+
+  const handlePinterestFacebookShare = async (singleProductId?: string) => {
+    if (isFbShareRunning) return;
+    wasRunningRef.current = true;
+    setIsFbShareRunning(true);
+    setShowInlineLiveMonitor(true);
+    setFbShareStep({ step: 1, message: 'Verifying Facebook session & WorldNewzs Page identity...' });
+
+    const specificIds = singleProductId
+      ? [singleProductId]
+      : selectedPinIds.size > 0
+      ? Array.from(selectedPinIds)
+      : undefined;
+
+    const effectiveEndPage = Math.max(pinPage, endPage);
+    const pagesSpan = effectiveEndPage - pinPage + 1;
+    const countToShare = specificIds
+      ? specificIds.length
+      : pagesSpan > 1
+      ? pagesSpan * 6
+      : fbSharePinCount === 0
+      ? Math.max(1, pendingCount)
+      : fbSharePinCount;
+
+    const destLabel = fbDestination === 'both' ? 'WorldNewzs Page & Group' : fbDestination === 'page' ? 'WorldNewzs Page Feed' : 'Amazon Affiliate Group';
+    setStatusMessage({
+      text: `🚀 Starting WorldNewzs Amazon Products → Facebook Automation (${
+        specificIds
+          ? `${specificIds.length} selected product(s)`
+          : pagesSpan > 1
+          ? `Page ${pinPage} to ${effectiveEndPage} (${countToShare} products, 6/page)`
+          : `Page ${pinPage} (${countToShare} products)`
+      } to ${destLabel}, ${fbShareDelay}s interval)...`,
+      severity: 'info',
+    });
+    try {
       const res = await api.pinterestFacebookShare({
         pinCount: countToShare,
         delaySeconds: fbShareDelay,
         specificPinIds: specificIds,
         destination: fbDestination,
+        startPage: pinPage,
+        endPage: specificIds ? undefined : effectiveEndPage,
       });
       setStatusMessage({
-        text: res.message || 'Pinterest → Facebook share started!',
+        text: res.message || 'WorldNewzs → Facebook automation started!',
         severity: 'success',
       });
     } catch (err: any) {
       setStatusMessage({
-        text: `Pinterest → Facebook share failed: ${err.message || err}`,
+        text: `WorldNewzs → Facebook share failed: ${err.message || err}`,
         severity: 'error',
       });
       wasRunningRef.current = false;
@@ -353,14 +479,14 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     try {
       const res = await api.cleanPostedPins();
       setStatusMessage({
-        text: `🧹 Clean Complete: Purged ${res.cleanedCount} already-posted pin(s) from Facebook Automation Hub (${res.remainingCount} unposted pins ready to share).`,
+        text: `🧹 Auto-Clear Verified: ${res.cleanedCount} already-posted Amazon product(s) cleared from queue (${res.remainingCount} newly added / unposted products ready across ${Math.ceil((res.remainingCount || 1) / 6)} pages).`,
         severity: 'success',
       });
-      await fetchDhanviPins(1, undefined, true);
+      await fetchDhanviPins(1, undefined, false);
       await fetchHistory();
     } catch (err: any) {
       setStatusMessage({
-        text: `Failed to clean posted pins: ${err.message || err}`,
+        text: `Failed to clean posted products: ${err.message || err}`,
         severity: 'error',
       });
     } finally {
@@ -383,7 +509,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
       {/* ── Main Header ── */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 2, flexWrap: 'wrap', gap: 2 }}>
         <Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 0.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 0.5, flexWrap: 'wrap' }}>
             <Box
               sx={{
                 width: 38,
@@ -403,13 +529,25 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               Facebook Automation Hub
             </Typography>
             <Chip
-              label="Dhanvi Collection → WorldNewzs Page & Amazon Affiliate Group"
+              label="worldnewzs.in/amazon-products (6/Page) → WorldNewzs Page & Affiliate Group"
               size="small"
               sx={{ bgcolor: '#EFF6FF', color: '#1D4ED8', fontWeight: 800, fontSize: '0.75rem' }}
             />
           </Box>
           <Typography variant="body2" color="text.secondary">
-            Automated publishing of unposted pins from Dhanvi Collections (<a href="https://in.pinterest.com/ganeshkumardevarasetty/" target="_blank" rel="noreferrer" style={{ color: '#E60023', fontWeight: 700, textDecoration: 'none' }}>@ganeshkumardevarasetty</a>) directly to <a href="https://www.facebook.com/profile.php?id=61589266599006" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>WorldNewzs Facebook Page</a> & <a href="https://www.facebook.com/groups/1761596288324903/" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>Amazon Affiliate Group</a>.
+            Automated publishing of newly added Amazon.in products from{' '}
+            <a href="https://worldnewzs.in/amazon-products" target="_blank" rel="noreferrer" style={{ color: '#D97706', fontWeight: 800, textDecoration: 'none' }}>
+              worldnewzs.in/amazon-products
+            </a>{' '}
+            (<strong>6 products per page</strong>, matching Amazon Deal Cards) directly to{' '}
+            <a href="https://www.facebook.com/profile.php?id=61589266599006" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>
+              WorldNewzs Facebook Page
+            </a>{' '}
+            &{' '}
+            <a href="https://www.facebook.com/groups/1761596288324903/" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>
+              Amazon Affiliate Group
+            </a>
+            . Completed items auto-clear immediately after posting.
           </Typography>
         </Box>
 
@@ -417,13 +555,13 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
           <Chip
             icon={<PushPinIcon fontSize="small" />}
-            label={`Ready to Post: ${pendingCount}`}
+            label={`New Unposted Deals: ${pendingCount} (${pinTotalPages} Pages × 6)`}
             size="small"
             sx={{ bgcolor: '#FEF3C7', color: '#92400E', fontWeight: 800 }}
           />
           <Chip
             icon={<CheckCircleIcon fontSize="small" />}
-            label={`Posted to Facebook: ${postedCount}`}
+            label={`Posted & Auto-Cleared: ${postedCount}`}
             size="small"
             clickable
             onClick={handleOpenHistory}
@@ -432,7 +570,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           />
           <Chip
             icon={<DeleteSweepIcon fontSize="small" />}
-            label="🧹 Posted Pins Filtered & Cleaned"
+            label="🧹 Auto-Clear Active"
             size="small"
             sx={{ bgcolor: '#EFF6FF', color: '#1D4ED8', fontWeight: 700 }}
           />
@@ -455,10 +593,10 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           gap: 1.5,
         }}
       >
-        {/* Left Controls: Pin count, Delay, Destination, Primary Share Button, Quick Select */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+        {/* Left Controls: Target, Page Range (6/page), Batch Size, Delay, Primary Share Button */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, flexWrap: 'wrap' }}>
           {/* Target Destination selector */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
             <Typography variant="caption" fontWeight={700} color="#475569">
               Target:
             </Typography>
@@ -468,13 +606,13 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               onChange={(e: any) => setFbDestination(e.target.value)}
               disabled={isFbShareRunning}
               sx={{
-                px: 1.2,
+                px: 1.1,
                 py: 0.6,
                 borderRadius: 1.5,
                 border: '1px solid #CBD5E1',
                 bgcolor: '#FFFFFF',
                 fontWeight: 800,
-                fontSize: '0.85rem',
+                fontSize: '0.82rem',
                 color: '#1E293B',
                 cursor: 'pointer',
               }}
@@ -485,40 +623,117 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             </Box>
           </Box>
 
-          {/* Pins to share selector */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+          {/* From Page / To Page Range (6 products per page, matching Amazon Deal Cards) */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
             <Typography variant="caption" fontWeight={700} color="#475569">
-              Pins:
+              From Page:
             </Typography>
             <Box
               component="select"
-              value={fbSharePinCount}
-              onChange={(e: any) => setFbSharePinCount(Number(e.target.value))}
+              value={pinPage}
+              onChange={(e: any) => {
+                const p = Number(e.target.value);
+                setPinPage(p);
+                if (endPage < p) setEndPage(p);
+              }}
               disabled={isFbShareRunning}
               sx={{
-                px: 1.2,
+                px: 1,
                 py: 0.6,
                 borderRadius: 1.5,
                 border: '1px solid #CBD5E1',
                 bgcolor: '#FFFFFF',
                 fontWeight: 800,
-                fontSize: '0.85rem',
+                fontSize: '0.82rem',
                 color: '#0F172A',
                 cursor: 'pointer',
               }}
             >
+              {Array.from({ length: Math.min(pinTotalPages, 500) }, (_, i) => i + 1).map((p) => (
+                <option key={p} value={p}>
+                  Page {p} (#{(p - 1) * 6 + 1}–#{Math.min(p * 6, pinTotalCount)})
+                </option>
+              ))}
+            </Box>
+          </Box>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+            <Typography variant="caption" fontWeight={700} color="#475569">
+              To Page:
+            </Typography>
+            <Box
+              component="select"
+              value={Math.max(pinPage, endPage)}
+              onChange={(e: any) => {
+                const ep = Number(e.target.value);
+                setEndPage(ep);
+                setFbSharePinCount(Math.max(1, ep - pinPage + 1) * 6);
+              }}
+              disabled={isFbShareRunning}
+              sx={{
+                px: 1,
+                py: 0.6,
+                borderRadius: 1.5,
+                border: '1px solid #CBD5E1',
+                bgcolor: '#FFFFFF',
+                fontWeight: 800,
+                fontSize: '0.82rem',
+                color: '#0F172A',
+                cursor: 'pointer',
+              }}
+            >
+              {Array.from({ length: Math.min(pinTotalPages, 500) }, (_, i) => i + 1)
+                .filter((p) => p >= pinPage)
+                .slice(0, 50)
+                .map((p) => (
+                  <option key={p} value={p}>
+                    Page {p} ({(p - pinPage + 1) * 6} Deals)
+                  </option>
+                ))}
+            </Box>
+          </Box>
+
+          {/* Deals count selector */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+            <Typography variant="caption" fontWeight={700} color="#475569">
+              Batch:
+            </Typography>
+            <Box
+              component="select"
+              value={fbSharePinCount}
+              onChange={(e: any) => {
+                const val = Number(e.target.value);
+                setFbSharePinCount(val);
+                if (val >= 6) {
+                  setEndPage(pinPage + Math.floor(val / 6) - 1);
+                } else {
+                  setEndPage(pinPage);
+                }
+              }}
+              disabled={isFbShareRunning}
+              sx={{
+                px: 1,
+                py: 0.6,
+                borderRadius: 1.5,
+                border: '1px solid #CBD5E1',
+                bgcolor: '#FFFFFF',
+                fontWeight: 800,
+                fontSize: '0.82rem',
+                color: '#0F172A',
+                cursor: 'pointer',
+              }}
+            >
+              <option value={6}>6 Deals (1 Page — Recommended)</option>
+              <option value={12}>12 Deals (2 Pages)</option>
+              <option value={18}>18 Deals (3 Pages)</option>
+              <option value={24}>24 Deals (4 Pages)</option>
+              <option value={30}>30 Deals (5 Pages)</option>
               <option value={0}>All Unposted ({pendingCount})</option>
-              <option value={5}>5 Pins</option>
-              <option value={10}>10 Pins (Recommended)</option>
-              <option value={15}>15 Pins</option>
-              <option value={20}>20 Pins</option>
-              <option value={25}>25 Pins</option>
-              <option value={50}>50 Pins</option>
             </Box>
           </Box>
 
           {/* Delay selector */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
             <Typography variant="caption" fontWeight={700} color="#475569">
               Interval:
             </Typography>
@@ -528,17 +743,18 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               onChange={(e: any) => setFbShareDelay(Number(e.target.value))}
               disabled={isFbShareRunning}
               sx={{
-                px: 1.2,
+                px: 1,
                 py: 0.6,
                 borderRadius: 1.5,
                 border: '1px solid #CBD5E1',
                 bgcolor: '#FFFFFF',
                 fontWeight: 800,
-                fontSize: '0.85rem',
+                fontSize: '0.82rem',
                 color: '#0F172A',
                 cursor: 'pointer',
               }}
             >
+              <option value={15}>15 secs (Fast)</option>
               <option value={30}>30 secs</option>
               <option value={60}>60 secs (Safe)</option>
               <option value={90}>90 secs</option>
@@ -559,9 +775,9 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               fontWeight: 800,
               textTransform: 'none',
               borderRadius: 2,
-              px: 2.5,
-              py: 0.9,
-              fontSize: '0.88rem',
+              px: 2.2,
+              py: 0.85,
+              fontSize: '0.86rem',
               boxShadow: '0 2px 6px rgba(24, 119, 242, 0.3)',
               '&:hover': { bgcolor: '#0C63D4' },
               '&:disabled': { bgcolor: '#93C5FD', color: '#FFFFFF' },
@@ -569,13 +785,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           >
             {isFbShareRunning
               ? 'Sharing to Facebook...'
-              : `🚀 Share ${
-                  selectedPinIds.size > 0
-                    ? selectedPinIds.size
-                    : fbSharePinCount === 0
-                    ? pendingCount
-                    : fbSharePinCount
-                } Unposted Pins`}
+              : selectedPinIds.size > 0
+              ? `🚀 Share ${selectedPinIds.size} Selected Product(s)`
+              : endPage > pinPage
+              ? `🚀 Share Pages ${pinPage}–${endPage} (${(endPage - pinPage + 1) * 6} Deals)`
+              : `🚀 Share Page ${pinPage} (${fbSharePinCount === 0 ? pendingCount : fbSharePinCount} Deals)`}
           </Button>
 
           {isFbShareRunning && (
@@ -589,7 +803,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 textTransform: 'none',
                 borderRadius: 2,
                 px: 2,
-                py: 0.9,
+                py: 0.85,
                 fontSize: '0.84rem',
               }}
             >
@@ -597,11 +811,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             </Button>
           )}
 
-          {/* Select 10 Unposted Helper Button */}
+          {/* Select Current Page (6 Deals) Helper Button */}
           <Button
             variant="outlined"
             size="medium"
-            onClick={handleSelect10Unposted}
+            onClick={handleSelectCurrentPage6}
             disabled={isFbShareRunning}
             sx={{
               borderColor: '#CBD5E1',
@@ -609,22 +823,47 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               fontWeight: 700,
               textTransform: 'none',
               borderRadius: 2,
-              px: 1.8,
-              py: 0.8,
-              fontSize: '0.82rem',
+              px: 1.5,
+              py: 0.75,
+              fontSize: '0.8rem',
               bgcolor: '#FFFFFF',
               '&:hover': { bgcolor: '#F1F5F9', borderColor: '#94A3B8' },
             }}
           >
-            ⚡ Select 10 Unposted
+            ⚡ Select Page {pinPage} (6 Deals)
           </Button>
 
-          {/* Clean Posted Pins Button */}
-          <Tooltip title="Remove any pins already posted to Facebook from the active hub">
+          {/* Sync New WorldNewzs Products Button */}
+          <Tooltip title="Fetch newly added Amazon.in products from worldnewzs.in/amazon-products">
             <Button
               variant="outlined"
               size="medium"
-              startIcon={isCleaning ? <CircularProgress size={16} color="inherit" /> : <DeleteSweepIcon />}
+              startIcon={isSyncingWorldNewzs ? <CircularProgress size={15} color="inherit" /> : <SyncIcon />}
+              onClick={handleSyncWorldNewzsDeals}
+              disabled={isSyncingWorldNewzs || isFbShareRunning}
+              sx={{
+                borderColor: '#93C5FD',
+                color: '#1D4ED8',
+                fontWeight: 700,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
+                bgcolor: '#EFF6FF',
+                '&:hover': { bgcolor: '#DBEAFE', borderColor: '#2563EB' },
+              }}
+            >
+              {isSyncingWorldNewzs ? 'Syncing...' : '🔄 Sync WorldNewzs Deals'}
+            </Button>
+          </Tooltip>
+
+          {/* Clean Posted Products Button */}
+          <Tooltip title="Verify and purge any already-posted Amazon products from the active queue">
+            <Button
+              variant="outlined"
+              size="medium"
+              startIcon={isCleaning ? <CircularProgress size={15} color="inherit" /> : <DeleteSweepIcon />}
               onClick={handleCleanPostedPins}
               disabled={isCleaning || isFbShareRunning}
               sx={{
@@ -633,14 +872,14 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 fontWeight: 700,
                 textTransform: 'none',
                 borderRadius: 2,
-                px: 1.8,
-                py: 0.8,
-                fontSize: '0.82rem',
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
                 bgcolor: '#FFF7ED',
                 '&:hover': { bgcolor: '#FFEDD5', borderColor: '#EA580C' },
               }}
             >
-              {isCleaning ? 'Cleaning...' : '🧹 Clean Posted Pins'}
+              {isCleaning ? 'Cleaning...' : '🧹 Clear Posted'}
             </Button>
           </Tooltip>
 
@@ -748,8 +987,8 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             📜 History ({historyStats?.facebookCount || postedCount || 0})
           </Button>
 
-          {/* Refresh Pins */}
-          <Tooltip title="Refresh Dhanvi Collection pins from Pinterest">
+          {/* Refresh Unposted Deals */}
+          <Tooltip title="Refresh unposted Amazon deals from worldnewzs.in/amazon-products">
             <IconButton
               size="small"
               onClick={() => fetchDhanviPins(pinPage, pinFilter, true)}
@@ -827,11 +1066,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
             {[
               { n: 1, label: 'FB Session' },
-              { n: 2, label: 'Pinterest Pins' },
-              { n: 3, label: 'Image Check' },
+              { n: 2, label: 'WorldNewzs 6/Page' },
+              { n: 3, label: '1500px Image' },
               { n: 4, label: 'FB Page' },
               { n: 5, label: 'FB Group' },
-              { n: 6, label: 'Record Proof' },
+              { n: 6, label: 'Clear & Record' },
               { n: 7, label: 'Complete' },
             ].map((s) => (
               <Chip
@@ -862,75 +1101,202 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         </Paper>
       )}
 
-      {/* ── Live Activity Stream Terminal ── */}
-      {socialLogs.length > 0 && (
+      {/* ── Live Activity Stream Terminal + Inline Live Playwright Browser Monitor ── */}
+      {(socialLogs.length > 0 || isFbShareRunning || liveBrowserFrame) && (
         <Box sx={{ mb: 2.5 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.8 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.8, flexWrap: 'wrap', gap: 1 }}>
             <Typography variant="caption" fontWeight={800} color="#475569" sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
               <TerminalIcon fontSize="small" sx={{ color: '#2563EB', fontSize: 16 }} />
-              Live Playwright & Facebook Automation Feed ({socialLogs.length} events)
+              Live Playwright & WorldNewzs → Facebook Automation Stream ({socialLogs.length} events)
             </Typography>
-            <Button
-              size="small"
-              onClick={() => setSocialLogs([])}
-              sx={{ textTransform: 'none', fontSize: '0.7rem', p: 0, color: '#64748B' }}
-            >
-              Clear Feed
-            </Button>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <Button
+                size="small"
+                onClick={() => setShowInlineLiveMonitor((prev) => !prev)}
+                sx={{ textTransform: 'none', fontSize: '0.72rem', p: 0, color: '#2563EB', fontWeight: 700 }}
+              >
+                {showInlineLiveMonitor ? '🔽 Hide Inline Browser View' : '🖥️ Show Inline Browser View'}
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setLiveBrowserModalOpen(true)}
+                sx={{ textTransform: 'none', fontSize: '0.72rem', p: 0, color: '#059669', fontWeight: 700 }}
+              >
+                🔍 Full Screen Browser
+              </Button>
+              {socialLogs.length > 0 && (
+                <Button
+                  size="small"
+                  onClick={() => setSocialLogs([])}
+                  sx={{ textTransform: 'none', fontSize: '0.7rem', p: 0, color: '#64748B' }}
+                >
+                  Clear Feed
+                </Button>
+              )}
+            </Box>
           </Box>
-          <Paper
-            variant="outlined"
-            sx={{
-              p: 1.5,
-              bgcolor: '#0F172A',
-              color: '#F8FAFC',
-              borderRadius: 2,
-              maxHeight: 180,
-              overflowY: 'auto',
-              fontFamily: 'monospace',
-              fontSize: '0.74rem',
-              border: '1px solid #1E293B',
-            }}
-          >
-            {socialLogs.map((log, idx) => (
-              <Box key={idx} sx={{ py: 0.2, display: 'flex', gap: 1, alignItems: 'flex-start' }}>
-                <Typography variant="caption" sx={{ color: '#64748B', whiteSpace: 'nowrap', fontSize: '0.7rem' }}>
-                  [{log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString()}]
-                </Typography>
-                <Typography
-                  variant="caption"
+
+          <Grid container spacing={1.5}>
+            {/* Left: Terminal Log Stream */}
+            <Grid item xs={12} md={showInlineLiveMonitor ? 7 : 12}>
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.5,
+                  bgcolor: '#0F172A',
+                  color: '#F8FAFC',
+                  borderRadius: 2,
+                  height: showInlineLiveMonitor ? 220 : 180,
+                  overflowY: 'auto',
+                  fontFamily: 'monospace',
+                  fontSize: '0.74rem',
+                  border: '1px solid #1E293B',
+                }}
+              >
+                {socialLogs.length === 0 ? (
+                  <Typography variant="caption" sx={{ color: '#64748B', fontFamily: 'monospace' }}>
+                    Waiting for Playwright automation stream... Click "Post Page {pinPage} (6 Deals)" to watch live execution.
+                  </Typography>
+                ) : (
+                  socialLogs.map((log, idx) => (
+                    <Box key={idx} sx={{ py: 0.2, display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                      <Typography variant="caption" sx={{ color: '#64748B', whiteSpace: 'nowrap', fontSize: '0.7rem' }}>
+                        [{log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString()}]
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontFamily: 'monospace',
+                          fontSize: '0.72rem',
+                          color:
+                            log.level === 'error'
+                              ? '#F87171'
+                              : log.level === 'warning'
+                              ? '#FBBF24'
+                              : log.level === 'success'
+                              ? '#4ADE80'
+                              : '#E2E8F0',
+                          fontWeight: log.level === 'success' || log.level === 'error' ? 700 : 400,
+                        }}
+                      >
+                        {log.message}
+                      </Typography>
+                    </Box>
+                  ))
+                )}
+                <div ref={terminalEndRef} />
+              </Paper>
+            </Grid>
+
+            {/* Right: Inline Live Playwright Browser Split-Monitor */}
+            {showInlineLiveMonitor && (
+              <Grid item xs={12} md={5}>
+                <Paper
+                  variant="outlined"
                   sx={{
-                    fontFamily: 'monospace',
-                    fontSize: '0.72rem',
-                    color:
-                      log.level === 'error'
-                        ? '#F87171'
-                        : log.level === 'warning'
-                        ? '#FBBF24'
-                        : log.level === 'success'
-                        ? '#4ADE80'
-                        : '#E2E8F0',
-                    fontWeight: log.level === 'success' || log.level === 'error' ? 700 : 400,
+                    height: 220,
+                    bgcolor: '#0F172A',
+                    borderRadius: 2,
+                    border: isFbShareRunning ? '2px solid #38BDF8' : '1px solid #1E293B',
+                    overflow: 'hidden',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    position: 'relative',
                   }}
                 >
-                  {log.message}
-                </Typography>
-              </Box>
-            ))}
-            <div ref={terminalEndRef} />
-          </Paper>
+                  <Box
+                    sx={{
+                      px: 1.2,
+                      py: 0.5,
+                      bgcolor: '#1E293B',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      borderBottom: '1px solid #334155',
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                      <DesktopWindowsIcon sx={{ fontSize: 14, color: '#38BDF8' }} />
+                      <Typography variant="caption" fontWeight={800} sx={{ color: '#F8FAFC', fontSize: '0.68rem' }}>
+                        Playwright Live Viewport (worldnewzs.in → Facebook)
+                      </Typography>
+                    </Box>
+                    <Chip
+                      label={isFbShareRunning ? '● LIVE' : 'IDLE'}
+                      size="small"
+                      sx={{
+                        height: 16,
+                        fontSize: '0.58rem',
+                        fontWeight: 800,
+                        bgcolor: isFbShareRunning ? '#EF4444' : '#334155',
+                        color: '#FFFFFF',
+                      }}
+                    />
+                  </Box>
+                  <Box
+                    onClick={() => setLiveBrowserModalOpen(true)}
+                    sx={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      bgcolor: '#020617',
+                      cursor: 'pointer',
+                      overflow: 'hidden',
+                      position: 'relative',
+                    }}
+                  >
+                    <img
+                      src={liveBrowserFrame ? api.resolveUrl(liveBrowserFrame) : api.getLiveFrameUrl()}
+                      alt="Playwright Live Preview"
+                      onError={(e: any) => {
+                        e.currentTarget.style.display = 'none';
+                      }}
+                      onLoad={(e: any) => {
+                        e.currentTarget.style.display = 'block';
+                      }}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'contain',
+                        display: 'block',
+                      }}
+                    />
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        position: 'absolute',
+                        bottom: 6,
+                        right: 8,
+                        bgcolor: 'rgba(15,23,42,0.85)',
+                        color: '#38BDF8',
+                        px: 0.8,
+                        py: 0.2,
+                        borderRadius: 1,
+                        fontSize: '0.62rem',
+                        fontWeight: 700,
+                        border: '1px solid #334155',
+                      }}
+                    >
+                      Click to Expand
+                    </Typography>
+                  </Box>
+                </Paper>
+              </Grid>
+            )}
+          </Grid>
         </Box>
       )}
 
-      {/* ── Filter Tabs Bar ── */}
+      {/* ── Filter & Pagination Bar (Strictly 6 Products / Page) ── */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1.5 }}>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <FilterListIcon fontSize="small" sx={{ color: '#64748B' }} />
           <Typography variant="body2" fontWeight={800} color="#334155">
-            Active Pins:
+            Active Queue (worldnewzs.in/amazon-products):
           </Typography>
           <Chip
-            label={`🟡 Unposted Ready Pins (${pinTotalCount})`}
+            label={`🟡 Unposted Amazon Deals (${pinTotalCount}) • 6 Per Page`}
             size="small"
             sx={{
               fontWeight: 800,
@@ -958,7 +1324,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               '&:hover': { bgcolor: '#FFEDD5' },
             }}
           >
-            {isCleaning ? 'Cleaning...' : '🧹 Clean Posted Pins'}
+            {isCleaning ? 'Cleaning...' : '🧹 Auto-Clear Posted'}
           </Button>
           <Button
             size="small"
@@ -983,8 +1349,8 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Typography variant="caption" color="text.secondary" fontWeight={600}>
-            Showing {pinTotalCount > 0 ? (pinPage - 1) * pinPageSize + 1 : 0} to {Math.min(pinPage * pinPageSize, pinTotalCount)} of {pinTotalCount}
+          <Typography variant="caption" color="text.secondary" fontWeight={700}>
+            Page {pinPage} of {pinTotalPages} • Showing {pinTotalCount > 0 ? (pinPage - 1) * pinPageSize + 1 : 0}–{Math.min(pinPage * pinPageSize, pinTotalCount)} of {pinTotalCount} Unposted Deals
           </Typography>
           {pinTotalPages > 1 && (
             <Pagination
@@ -999,23 +1365,40 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         </Box>
       </Box>
 
-      {/* ── Dhanvi Collection Pins Grid ── */}
+      {/* ── WorldNewzs Amazon Deals Grid (6 Cards Per Page = 3 Columns x 2 Rows) ── */}
       {isLoadingPins ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', py: 8, gap: 1.5 }}>
           <CircularProgress size={28} sx={{ color: '#1877F2' }} />
           <Typography variant="body2" color="text.secondary" fontWeight={700}>
-            Loading Dhanvi Collection pins...
+            Loading unposted Amazon deals (6 per page) from worldnewzs.in/amazon-products...
           </Typography>
         </Box>
       ) : dhanviPins.length === 0 ? (
         <Paper variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: '#F8FAFC', borderColor: '#E2E8F0', borderRadius: 2 }}>
           <Typography variant="body1" color="#0F172A" fontWeight={800} sx={{ mb: 0.5 }}>
-            🎉 All Dhanvi Collection pins have been published to Facebook or cleaned!
+            🎉 All newly added Amazon products on worldnewzs.in/amazon-products have been posted to Facebook & auto-cleared!
           </Typography>
           <Typography variant="body2" color="text.secondary" fontWeight={500} sx={{ mb: 2 }}>
-            Click "Refresh Pins" to discover newly published pins from Pinterest, or download your completion reports below:
+            Click "🔄 Sync WorldNewzs Deals" when new Amazon.in products are added, or download your completion reports below:
           </Typography>
           <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+            <Button
+              variant="outlined"
+              size="medium"
+              startIcon={isSyncingWorldNewzs ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+              onClick={handleSyncWorldNewzsDeals}
+              disabled={isSyncingWorldNewzs}
+              sx={{
+                borderColor: '#1877F2',
+                color: '#1877F2',
+                fontWeight: 800,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 2.5,
+              }}
+            >
+              🔄 Sync WorldNewzs Deals
+            </Button>
             <Button
               variant="contained"
               size="medium"
@@ -1070,12 +1453,15 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         </Paper>
       ) : (
         <Grid container spacing={2}>
-          {dhanviPins.map((pin) => {
+          {dhanviPins.map((pin, idx) => {
             const isSelected = selectedPinIds.has(pin.pinId);
             const isPosted = pin.status === 'posted';
+            const cardNumOnPage = pin.cardIndexOnPage || idx + 1;
+            const asinCode = pin.asin || pin.pinId;
+            const directAmazonUrl = pin.dealUrl || pin.destinationLink || pin.pinUrl;
 
             return (
-              <Grid item xs={6} sm={4} md={3} lg={2} key={pin.pinId}>
+              <Grid item xs={12} sm={6} md={4} key={pin.pinId}>
                 <Card
                   variant="outlined"
                   sx={{
@@ -1094,22 +1480,53 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                     },
                   }}
                 >
-                  {/* Selection Checkbox */}
-                  <Box sx={{ position: 'absolute', top: 6, left: 6, zIndex: 2, bgcolor: 'rgba(255,255,255,0.92)', borderRadius: 1.5, p: 0.2 }}>
+                  {/* Top-Left: Selection Checkbox + Page & Card Slot Badge */}
+                  <Box
+                    sx={{
+                      position: 'absolute',
+                      top: 8,
+                      left: 8,
+                      zIndex: 2,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 0.6,
+                      bgcolor: 'rgba(255,255,255,0.94)',
+                      borderRadius: 1.5,
+                      px: 0.6,
+                      py: 0.2,
+                      border: '1px solid #E2E8F0',
+                    }}
+                  >
                     <Checkbox
                       size="small"
                       checked={isSelected}
                       onChange={() => toggleSelectPin(pin.pinId)}
                       sx={{ p: 0.2, color: '#1877F2', '&.Mui-checked': { color: '#1877F2' } }}
                     />
+                    <Typography variant="caption" fontWeight={800} sx={{ fontSize: '0.66rem', color: '#1E293B' }}>
+                      Page {pin.pageNumber || pinPage} • #{cardNumOnPage}/6
+                    </Typography>
                   </Box>
 
-                  {/* Status Overlay Badges */}
-                  <Box sx={{ position: 'absolute', top: 6, right: 6, zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.4 }}>
+                  {/* Top-Right: Discount + Status + High-Res Photo Badges */}
+                  <Box sx={{ position: 'absolute', top: 8, right: 8, zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.4 }}>
+                    {pin.discount && (
+                      <Chip
+                        label={String(pin.discount).toUpperCase().includes('OFF') ? pin.discount : `${pin.discount} OFF`}
+                        size="small"
+                        sx={{
+                          height: 20,
+                          fontSize: '0.62rem',
+                          fontWeight: 900,
+                          bgcolor: '#DC2626',
+                          color: '#FFFFFF',
+                        }}
+                      />
+                    )}
                     {isPosted ? (
                       <Chip
                         icon={<CheckCircleIcon sx={{ fontSize: '13px !important' }} />}
-                        label="ON FB"
+                        label="POSTED"
                         size="small"
                         sx={{
                           height: 20,
@@ -1122,7 +1539,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                       />
                     ) : (
                       <Chip
-                        label="READY"
+                        label="NEW DEAL"
                         size="small"
                         sx={{
                           height: 20,
@@ -1134,11 +1551,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                         }}
                       />
                     )}
-                    {pin.imageUrl ? (
-                      <Tooltip title="High-res image verified & ready for Facebook photo upload" arrow>
+                    {pin.imageUrl && (
+                      <Tooltip title="1500px High-Res Amazon Product Image verified for Facebook upload" arrow>
                         <Chip
                           icon={<PhotoCameraIcon sx={{ fontSize: '11px !important', color: '#047857 !important' }} />}
-                          label="PHOTO"
+                          label="1500px HD"
                           size="small"
                           sx={{
                             height: 18,
@@ -1151,36 +1568,22 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                           }}
                         />
                       </Tooltip>
-                    ) : (
-                      <Tooltip title="Image URL missing; will auto-resolve before post" arrow>
-                        <Chip
-                          label="NO IMG"
-                          size="small"
-                          sx={{
-                            height: 18,
-                            fontSize: '0.58rem',
-                            fontWeight: 700,
-                            bgcolor: '#FEE2E2',
-                            color: '#991B1B',
-                            border: '1px solid #FECACA',
-                            px: 0.2,
-                          }}
-                        />
-                      </Tooltip>
                     )}
                   </Box>
 
-                  {/* Image with Eager/Off-thread Decoding */}
+                  {/* Product Image */}
                   <Box
                     sx={{
                       width: '100%',
-                      height: 140,
+                      height: 165,
                       bgcolor: '#F8FAFC',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
                       overflow: 'hidden',
-                      p: 0.5,
+                      pt: 3.5,
+                      pb: 1,
+                      px: 1.5,
                     }}
                   >
                     {pin.imageUrl ? (
@@ -1189,7 +1592,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                         alt={pin.title}
                         loading="eager"
                         decoding="async"
-                        width={140}
+                        width={160}
                         height={140}
                         onError={(e: any) => {
                           e.currentTarget.style.display = 'none';
@@ -1205,12 +1608,12 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                     )}
                   </Box>
 
-                  {/* Pin Details */}
-                  <Box sx={{ p: 1.2, flexGrow: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                  {/* Product Details (Matching Amazon Deal Cards) */}
+                  <Box sx={{ p: 1.5, flexGrow: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                     <Box>
                       <Tooltip title={pin.title} arrow>
                         <Typography
-                          variant="caption"
+                          variant="body2"
                           fontWeight={700}
                           color="#0F172A"
                           sx={{
@@ -1218,35 +1621,121 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                             WebkitLineClamp: 2,
                             WebkitBoxOrient: 'vertical',
                             overflow: 'hidden',
-                            lineHeight: 1.3,
-                            fontSize: '0.74rem',
+                            lineHeight: 1.35,
+                            fontSize: '0.82rem',
+                            minHeight: '2.2rem',
                           }}
                         >
                           {pin.title}
                         </Typography>
                       </Tooltip>
-                      {pin.price && (
-                        <Typography variant="caption" fontWeight={800} color="#D97706" sx={{ display: 'block', mt: 0.4 }}>
-                          {pin.price}
-                        </Typography>
-                      )}
+
+                      {/* Price, MRP & Category Row */}
+                      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, mt: 0.8, flexWrap: 'wrap' }}>
+                        {pin.price && (
+                          <Typography variant="subtitle2" fontWeight={900} color="#B45309" sx={{ fontSize: '0.95rem' }}>
+                            {String(pin.price).startsWith('₹') ? pin.price : `₹${pin.price}`}
+                          </Typography>
+                        )}
+                        {pin.originalPrice && (
+                          <Typography
+                            variant="caption"
+                             sx={{ textDecoration: 'line-through', color: '#94A3B8', fontWeight: 600, fontSize: '0.75rem' }}
+                          >
+                            {String(pin.originalPrice).startsWith('₹') ? pin.originalPrice : `₹${pin.originalPrice}`}
+                          </Typography>
+                        )}
+                        {pin.category && (
+                          <Chip
+                            label={pin.category}
+                            size="small"
+                            sx={{
+                              height: 18,
+                              fontSize: '0.6rem',
+                              fontWeight: 700,
+                              bgcolor: '#F1F5F9',
+                              color: '#475569',
+                              ml: 'auto',
+                            }}
+                          />
+                        )}
+                      </Box>
                     </Box>
 
-                    {/* Footer with Pin ID & Link */}
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1, pt: 0.6, borderTop: '1px solid #F1F5F9' }}>
-                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem', fontFamily: 'monospace' }}>
-                        ID: {pin.pinId.slice(-6)}
-                      </Typography>
-                      {pin.pinUrl && (
-                        <IconButton
+                    {/* Footer: ASIN, Amazon.in Link, and 1-Click Share to FB */}
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        mt: 1.2,
+                        pt: 0.8,
+                        borderTop: '1px solid #F1F5F9',
+                        gap: 0.8,
+                      }}
+                    >
+                      <Chip
+                        label={`ASIN: ${asinCode.slice(-10)}`}
+                        size="small"
+                        sx={{
+                          height: 20,
+                          fontSize: '0.62rem',
+                          fontFamily: 'monospace',
+                          fontWeight: 700,
+                          bgcolor: '#F8FAFC',
+                          color: '#475569',
+                          border: '1px solid #E2E8F0',
+                        }}
+                      />
+
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                        {directAmazonUrl && (
+                          <Tooltip title={`Open Amazon.in Product (${directAmazonUrl})`} arrow>
+                            <IconButton
+                              size="small"
+                              onClick={() => window.open(directAmazonUrl, '_blank')}
+                              sx={{ p: 0.4, color: '#D97706', border: '1px solid #FDE68A', bgcolor: '#FFFBEB', borderRadius: 1.5 }}
+                            >
+                              <OpenInNewIcon sx={{ fontSize: 13 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+                        <Button
                           size="small"
-                          onClick={() => window.open(pin.pinUrl, '_blank')}
-                          title="Open Pin on Pinterest"
-                          sx={{ p: 0.3 }}
+                          variant="contained"
+                          disabled={isFbShareRunning}
+                          onClick={async () => {
+                            setIsFbShareRunning(true);
+                            setFbShareStep({ step: 1, message: `Posting ${pin.title.slice(0, 32)}...` });
+                            try {
+                              await api.pinterestFacebookShare({
+                                pinCount: 1,
+                                delaySeconds: fbShareDelay || 15,
+                                destination: fbDestination,
+                                startPage: pinPage,
+                                endPage: pinPage,
+                                specificPinIds: [pin.pinId],
+                              });
+                            } catch (e: any) {
+                              setIsFbShareRunning(false);
+                              setStatusMessage({ text: e.message || 'Failed to start Facebook share', severity: 'error' });
+                            }
+                          }}
+                          sx={{
+                            textTransform: 'none',
+                            fontWeight: 800,
+                            fontSize: '0.68rem',
+                            py: 0.25,
+                            px: 1,
+                            minWidth: 0,
+                            borderRadius: 1.5,
+                            bgcolor: '#1877F2',
+                            '&:hover': { bgcolor: '#155DB2' },
+                          }}
                         >
-                          <OpenInNewIcon sx={{ fontSize: 13, color: '#64748B' }} />
-                        </IconButton>
-                      )}
+                          Share to FB
+                        </Button>
+                      </Box>
                     </Box>
                   </Box>
                 </Card>
@@ -1286,7 +1775,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <DesktopWindowsIcon sx={{ color: '#38BDF8' }} />
             <Typography variant="h6" fontWeight={800} color="#F8FAFC">
-              Playwright Live Browser Screen Tracking
+              Playwright Live Browser Screen (worldnewzs.in/amazon-products → Facebook)
             </Typography>
             {isFbShareRunning ? (
               <Chip
@@ -1330,10 +1819,10 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         <DialogContent sx={{ p: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 460 }}>
           <Box sx={{ width: '100%', mb: 1.5, display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: '#1E293B', p: 1, borderRadius: 2 }}>
             <Typography variant="caption" sx={{ color: '#38BDF8', fontWeight: 700 }}>
-              {fbShareStep ? `Step ${fbShareStep.step}/7: ${fbShareStep.message}` : 'Target: Facebook Group "Amazon Affiliate Group" (Worldnewzs Page)'}
+              {fbShareStep ? `Step ${fbShareStep.step}/7: ${fbShareStep.message}` : 'Source: worldnewzs.in/amazon-products (6/page) → Facebook Group "Amazon Affiliate Group"'}
             </Typography>
             <Typography variant="caption" sx={{ color: '#94A3B8' }}>
-              Engine: Playwright 1.62.0 CDP
+              Engine: Playwright CDP + Visual Spotlight HUD
             </Typography>
           </Box>
 
@@ -1411,10 +1900,10 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         <DialogTitle sx={{ textAlign: 'center', pt: 2, pb: 1 }}>
           <CheckCircleIcon sx={{ fontSize: 52, color: '#16A34A', mb: 1 }} />
           <Typography variant="h5" fontWeight={800} color="#0F172A">
-            Pinterest → Facebook Share Complete!
+            WorldNewzs → Facebook Share Complete!
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Automated sharing of unposted Dhanvi Collection pins to WorldNewzs Page & Amazon Affiliate Group has finished.
+            Automated sharing of unposted Amazon.in deals from worldnewzs.in/amazon-products (6 per page) to WorldNewzs Page & Amazon Affiliate Group has finished. Posted items have been automatically cleared from the active queue.
           </Typography>
         </DialogTitle>
 
@@ -1437,7 +1926,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 {lastBatchResult?.successCount ?? lastBatchResult?.totalShared ?? lastBatchResult?.sharedCount ?? postedCount}
               </Typography>
               <Typography variant="caption" fontWeight={700} color="text.secondary">
-                PINS POSTED
+                DEALS POSTED & CLEARED
               </Typography>
             </Box>
             <Divider orientation="vertical" flexItem />
@@ -1446,7 +1935,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 {lastBatchResult?.skippedCount ?? 0}
               </Typography>
               <Typography variant="caption" fontWeight={700} color="text.secondary">
-                SKIPPED (ON FB)
+                SKIPPED (ALREADY ON FB)
               </Typography>
             </Box>
             <Divider orientation="vertical" flexItem />
@@ -1461,7 +1950,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           </Paper>
 
           <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }}>
-            Live proofs and deduplication audit records are saved. Click below to export your Excel spreadsheet or download the dated PDF report:
+            Live proofs and ASIN deduplication records are saved. Click below to export your Excel spreadsheet or download the dated PDF report:
           </Alert>
 
           <Box sx={{ display: 'flex', gap: 1.5, flexDirection: { xs: 'column', sm: 'row' } }}>
@@ -1567,7 +2056,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <HistoryIcon sx={{ color: '#1877F2' }} />
             <Typography variant="h6" fontWeight={800}>
-              Facebook Share History & Audit Ledger
+              Facebook Share History & ASIN Audit Ledger
             </Typography>
           </Box>
           <IconButton onClick={() => setHistoryOpen(false)} size="small">
@@ -1585,7 +2074,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             />
             <Chip
               icon={<FacebookIcon fontSize="small" />}
-              label="Worldnewzs → Amazon Affiliate Group"
+              label="worldnewzs.in/amazon-products → Amazon Affiliate Group"
               sx={{ bgcolor: '#1877F2', color: '#fff', fontWeight: 800 }}
             />
             <Chip
@@ -1596,7 +2085,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
 
           {(!historyStats?.recentLogs || historyStats.recentLogs.length === 0) ? (
             <Alert severity="info" sx={{ borderRadius: 2 }}>
-              No pins have been logged yet. Click "Share to Facebook" to begin sharing your Dhanvi Collection pins!
+              No Amazon products have been logged yet. Click "Post Page 1 (6 Deals)" to begin sharing unposted deals from worldnewzs.in/amazon-products!
             </Alert>
           ) : (
             <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid #E2E8F0', borderRadius: 2, maxHeight: 400 }}>
@@ -1605,7 +2094,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                   <TableRow>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Date & Time</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Destination</TableCell>
-                    <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Product Title</TableCell>
+                    <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Amazon Product Title</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Status</TableCell>
                     <TableCell sx={{ fontWeight: 800, fontSize: '0.78rem' }}>Action</TableCell>
                   </TableRow>
@@ -1642,7 +2131,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                               overflow: 'hidden',
                             }}
                           >
-                            {log.title || 'Pinterest Deal'}
+                            {log.title || 'Amazon Deal'}
                           </Typography>
                         </TableCell>
                         <TableCell>
@@ -1678,11 +2167,11 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                         </TableCell>
                         <TableCell>
                           <Box sx={{ display: 'flex', gap: 0.5 }}>
-                            {log.pinUrl && (
+                            {(log.dealUrl || log.pinUrl) && (
                               <IconButton
                                 size="small"
-                                onClick={() => window.open(log.pinUrl, '_blank')}
-                                title="Open Pin on Pinterest"
+                                onClick={() => window.open(log.dealUrl || log.pinUrl, '_blank')}
+                                title="Open Amazon.in Product Link"
                               >
                                 <OpenInNewIcon fontSize="small" />
                               </IconButton>

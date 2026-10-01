@@ -73,6 +73,10 @@ class DeduplicationLedger:
 
     def __init__(self, filepath: str = HISTORY_FILE):
         self.filepath = filepath
+        self._last_mtime: float = 0.0
+        self._fb_ids_set: set = set()
+        self._fb_asins_set: set = set()
+        self._fb_titles_set: set = set()
         self.data: Dict[str, Any] = {
             "shared_pin_ids": [],
             "shared_image_urls": [],
@@ -84,6 +88,57 @@ class DeduplicationLedger:
         }
         self._load()
 
+    def ensure_fresh(self):
+        """Reloads ledger from disk if another worker or process updated social_share_history.json."""
+        try:
+            if os.path.exists(self.filepath):
+                mtime = os.path.getmtime(self.filepath)
+                if mtime > self._last_mtime:
+                    self._load()
+        except Exception:
+            pass
+
+    def _rebuild_fb_lookup_cache(self):
+        """Precomputes O(1) lookup sets for posted Facebook IDs, ASINs, and normalized titles."""
+        fb_ids = set(str(x).strip() for x in self.data.get("facebook_posted_pin_ids", []) if x)
+        fb_asins = set()
+        fb_titles = set()
+
+        for raw_item in list(fb_ids):
+            asin = self.extract_asin(raw_item)
+            if asin:
+                fb_asins.add(asin)
+
+        for log in self.data.get("post_logs", []):
+            if log.get("platform") == "facebook" and log.get("status") == "success":
+                for field in ("pinId", "pinUrl", "asin", "dealUrl"):
+                    v = str(log.get(field) or "").strip()
+                    if v:
+                        fb_ids.add(v)
+                        a = self.extract_asin(v)
+                        if a:
+                            fb_asins.add(a)
+                norm_t = self.normalize_title(str(log.get("title") or ""))
+                if len(norm_t) > 10:
+                    fb_titles.add(norm_t)
+
+        for rec in self.data.get("facebook_post_records", []):
+            if rec.get("status") == "success":
+                for field in ("pinId", "pinUrl", "asin", "dealUrl"):
+                    v = str(rec.get(field) or "").strip()
+                    if v:
+                        fb_ids.add(v)
+                        a = self.extract_asin(v)
+                        if a:
+                            fb_asins.add(a)
+                norm_t = self.normalize_title(str(rec.get("title") or ""))
+                if len(norm_t) > 10:
+                    fb_titles.add(norm_t)
+
+        self._fb_ids_set = fb_ids
+        self._fb_asins_set = fb_asins
+        self._fb_titles_set = fb_titles
+
     def _load(self):
         try:
             os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
@@ -91,6 +146,7 @@ class DeduplicationLedger:
             pass
         if os.path.exists(self.filepath):
             try:
+                self._last_mtime = os.path.getmtime(self.filepath)
                 with open(self.filepath, "r", encoding="utf-8") as f:
                     self.data = json.load(f)
             except Exception as e:
@@ -112,12 +168,17 @@ class DeduplicationLedger:
                         fb_set.add(str(p_id))
             self.data["facebook_posted_pin_ids"] = list(fb_set)
 
+        self._rebuild_fb_lookup_cache()
+
     def _save(self):
         try:
             with open(self.filepath, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
+            if os.path.exists(self.filepath):
+                self._last_mtime = os.path.getmtime(self.filepath)
         except Exception as e:
             print(f"[DeduplicationLedger] Error saving history: {e}")
+        self._rebuild_fb_lookup_cache()
 
     @staticmethod
     def normalize_title(title: str) -> str:
@@ -147,6 +208,7 @@ class DeduplicationLedger:
 
     def check_candidate(self, pin_id: str, pin_url: str, image_url: str, title: str) -> Dict[str, Any]:
         """Runs the first 3 deduplication layers."""
+        self.ensure_fresh()
         # Layer 1: Pin ID / URL
         if pin_id and pin_id in self.data["shared_pin_ids"]:
             return {"is_duplicate": True, "layer": 1, "reason": f"Pin ID '{pin_id}' already shared."}
@@ -167,6 +229,7 @@ class DeduplicationLedger:
 
     def is_description_unique(self, text: str) -> bool:
         """Layer 4: Checks if text hash has been posted before."""
+        self.ensure_fresh()
         h = self.hash_text(text)
         return h not in self.data["shared_description_hashes"]
 
@@ -182,6 +245,7 @@ class DeduplicationLedger:
         status: str = "success",
         error_message: str = ""
     ):
+        self.ensure_fresh()
         norm_img = self.normalize_image(image_url)
         norm_title = self.normalize_title(title)
         h = self.hash_text(text) if text else ""
@@ -214,20 +278,41 @@ class DeduplicationLedger:
         self.data["post_logs"].append(log_entry)
         self._save()
 
-    def is_posted_to_facebook(self, pin_id: str, pin_url: str = "") -> bool:
-        """Strictly checks if a Pin ID or URL has already been posted to Facebook."""
-        fb_ids = set(str(x).strip() for x in self.data.get("facebook_posted_pin_ids", []))
-        # Also include any pin from past successful Facebook post logs
-        for log in self.data.get("post_logs", []):
-            if log.get("platform") == "facebook" and log.get("status") == "success":
-                if log.get("pinId"):
-                    fb_ids.add(str(log.get("pinId")).strip())
-                if log.get("pinUrl"):
-                    fb_ids.add(str(log.get("pinUrl")).strip())
-        if pin_id and str(pin_id).strip() in fb_ids:
+    @staticmethod
+    def extract_asin(val: str) -> str:
+        """Extracts canonical 10-char Amazon ASIN from a raw ID or amazon.in URL."""
+        if not val:
+            return ""
+        s = str(val).strip()
+        m_dp = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", s, re.I)
+        if m_dp:
+            return m_dp.group(1).upper()
+        if re.fullmatch(r"[A-Z0-9]{10}", s, re.I) and any(c.isalpha() for c in s):
+            return s.upper()
+        m_id = re.search(r"deal-p\d+-c\d+-([A-Z0-9]{10})", s, re.I)
+        if m_id:
+            return m_id.group(1).upper()
+        return ""
+
+    def is_posted_to_facebook(self, pin_id: str, pin_url: str = "", title: str = "") -> bool:
+        """Strictly checks in O(1) if an Amazon ASIN, Product ID, URL, or Product Title has already been posted to Facebook."""
+        self.ensure_fresh()
+        cand_id = str(pin_id or "").strip()
+        cand_url = str(pin_url or "").strip()
+        if cand_id and cand_id in self._fb_ids_set:
             return True
-        if pin_url and str(pin_url).strip() in fb_ids:
+        if cand_url and cand_url in self._fb_ids_set:
             return True
+
+        cand_asin = self.extract_asin(cand_id) or self.extract_asin(cand_url)
+        if cand_asin and (cand_asin in self._fb_asins_set or cand_asin in self._fb_ids_set):
+            return True
+
+        if title:
+            norm_t = self.normalize_title(title)
+            if len(norm_t) > 10 and norm_t in self._fb_titles_set:
+                return True
+
         return False
 
     def check_facebook_candidate(self, pin_id: str, pin_url: str = "", image_url: str = "", title: str = "") -> Dict[str, Any]:
@@ -235,14 +320,14 @@ class DeduplicationLedger:
         Isolated deduplication check strictly for Facebook.
         Ensures Twitter history DOES NOT falsely block Facebook shares.
         """
-        if self.is_posted_to_facebook(pin_id, pin_url):
+        if self.is_posted_to_facebook(pin_id, pin_url, title):
             return {
                 "is_duplicate": True,
-                "reason": f"Pin ID '{pin_id}' has already been successfully posted to Facebook Group."
+                "reason": f"Product/Pin '{pin_id}' has already been successfully posted to Facebook."
             }
         return {
             "is_duplicate": False,
-            "reason": "Available to post on Facebook Group."
+            "reason": "Available to post on Facebook."
         }
 
     def record_facebook_share(
@@ -257,13 +342,17 @@ class DeduplicationLedger:
         error_message: str = ""
     ):
         """Records a Facebook share into dedicated Facebook ledger and post logs."""
+        self.ensure_fresh()
         pin_id_str = str(pin_id).strip() if pin_id else ""
         pin_url_str = str(pin_url).strip() if pin_url else ""
+        asin_str = self.extract_asin(pin_id_str) or self.extract_asin(pin_url_str)
 
         if status == "success":
             fb_pins = self.data.setdefault("facebook_posted_pin_ids", [])
             if pin_id_str and pin_id_str not in fb_pins:
                 fb_pins.append(pin_id_str)
+            if asin_str and asin_str not in fb_pins:
+                fb_pins.append(asin_str)
             if pin_url_str and pin_url_str not in fb_pins:
                 fb_pins.append(pin_url_str)
 
@@ -271,8 +360,10 @@ class DeduplicationLedger:
             "id": f"fb-share-{int(time.time()*1000)}-{random.randint(10, 99)}",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "pinId": pin_id_str,
+            "pinId": asin_str or pin_id_str,
+            "asin": asin_str,
             "pinUrl": pin_url_str,
+            "dealUrl": pin_url_str,
             "title": title,
             "content": text,
             "target": target,
@@ -288,10 +379,13 @@ class DeduplicationLedger:
             "timestamp": fb_record["timestamp"],
             "platform": "facebook",
             "target": target,
-            "pinId": pin_id_str,
+            "pinId": asin_str or pin_id_str,
+            "asin": asin_str,
             "pinUrl": pin_url_str,
+            "dealUrl": pin_url_str,
             "title": title,
             "content": text,
+            "screenshotPath": screenshot_path,
             "status": status,
             "error": error_message
         }
@@ -300,21 +394,35 @@ class DeduplicationLedger:
 
     def get_facebook_records(self) -> List[Dict[str, Any]]:
         """Returns all completed/logged Facebook share records."""
+        self.ensure_fresh()
         return self.data.get("facebook_post_records", [])
 
     def get_facebook_posted_ids(self) -> set:
-        """Returns set of all Pin IDs / URLs already posted to Facebook."""
-        return set(str(x) for x in self.data.get("facebook_posted_pin_ids", []))
-
+        """Returns set of all ASINs / Pin IDs / URLs already posted to Facebook."""
+        self.ensure_fresh()
+        return set(self._fb_ids_set | self._fb_asins_set)
 
     def get_stats(self) -> Dict[str, Any]:
+        self.ensure_fresh()
         logs = self.data.get("post_logs", [])
         fb_records = self.data.get("facebook_post_records", [])
+        fb_success_ids = set()
+        for r in fb_records:
+            if r.get("status") == "success":
+                key = r.get("asin") or r.get("pinId") or r.get("id")
+                if key:
+                    fb_success_ids.add(str(key))
+        for l in logs:
+            if l.get("platform") == "facebook" and l.get("status") == "success":
+                key = l.get("asin") or l.get("pinId") or l.get("id")
+                if key:
+                    fb_success_ids.add(str(key))
+        fb_count = max(len(fb_success_ids), len(self._fb_asins_set))
         return {
             "totalShared": sum(1 for l in logs if l.get("status") == "success"),
             "totalAttempts": len(logs),
             "twitterCount": sum(1 for l in logs if l.get("platform") == "twitter" and l.get("status") == "success"),
-            "facebookCount": len(self.data.get("facebook_posted_pin_ids", [])),
+            "facebookCount": fb_count,
             "facebookRecordsCount": len(fb_records),
             "failedCount": sum(1 for l in logs if l.get("status") == "failed"),
             "skippedCount": sum(1 for l in logs if l.get("status") == "skipped"),
@@ -331,9 +439,9 @@ class ContentShuffler:
         text = f"{category_raw} {title}".lower()
         if any(w in text for w in ["electronics", "gadget", "phone", "audio", "headphone", "cable", "watch", "camera"]):
             return "electronics"
-        if any(w in text for w in ["kitchen", "home", "cook", "decor", "curtain", "furniture", "stand", "bottle"]):
+        if any(w in text for w in ["kitchen", "home", "cook", "decor", "curtain", "furniture", "stand", "bottle", "bag", "storage"]):
             return "kitchen_home"
-        if any(w in text for w in ["fashion", "cloth", "t-shirt", "shirt", "pant", "shoe", "beauty", "dress"]):
+        if any(w in text for w in ["fashion", "cloth", "t-shirt", "shirt", "pant", "shoe", "beauty", "dress", "men", "women"]):
             return "fashion_lifestyle"
         return "general"
 
@@ -350,15 +458,29 @@ class ContentShuffler:
 
     @classmethod
     def generate_post(cls, deal: Dict[str, Any], ledger: Optional[DeduplicationLedger] = None) -> Dict[str, Any]:
-        title = deal.get("truncatedTitle") or deal.get("title", "Amazon Deal")
-        price = deal.get("price") or ""
-        original_price = deal.get("originalPrice") or ""
-        discount = deal.get("discount") or ""
-        pin_url = deal.get("pinUrl") or deal.get("shareUrl") or deal.get("dealUrl") or "https://in.pinterest.com/ganeshkumardevarasetty/"
-        category = cls.detect_category(deal.get("category", ""), title)
+        full_title = (deal.get("title") or deal.get("truncatedTitle") or "Amazon Deal").strip()
+        short_title = full_title[:95].strip() + ("..." if len(full_title) > 95 else "")
+        price = str(deal.get("price") or "").strip()
+        original_price = str(deal.get("originalPrice") or "").strip()
+        discount = str(deal.get("discount") or "").strip()
+        deal_url = (
+            deal.get("dealUrl")
+            or deal.get("productUrl")
+            or deal.get("pinUrl")
+            or deal.get("shareUrl")
+            or "https://worldnewzs.in/amazon-products"
+        )
+        category = cls.detect_category(deal.get("category") or deal.get("tag") or "", full_title)
 
-        if discount and not discount.endswith("%"):
-            discount = f"{discount}%"
+        if discount:
+            discount_clean = discount.upper().replace("OFF", "").strip()
+            if not discount_clean.endswith("%"):
+                discount_clean = f"{discount_clean}%"
+            discount_badge = f"{discount_clean} OFF"
+        else:
+            discount_badge = "LIMITED TIME DEAL"
+
+        mrp_note = f" (MRP: {original_price})" if original_price and original_price != price else ""
 
         for _ in range(10):
             emoji = random.choice(EMOJIS)
@@ -367,21 +489,21 @@ class ContentShuffler:
             pattern_id = random.randint(1, 4)
 
             if pattern_id == 1 and discount:
-                # Pattern 1: Discount First
-                body = f"{emoji} {discount} OFF! {title} is now available for {price}."
+                body = f"{emoji} {discount_badge}! {short_title}\n💰 Deal Price: {price}{mrp_note}"
             elif pattern_id == 2:
-                # Pattern 2: Price Drop Alert
-                savings = f"(Down from {original_price})" if original_price else f"({discount} discount)" if discount else ""
-                body = f"{emoji} Price Drop Alert: {title} slashed to {price} {savings}."
+                body = f"{emoji} Amazon India Price Drop Alert: {short_title}\n⚡ Now Just {price}{mrp_note} ({discount_badge})"
             elif pattern_id == 3:
-                # Pattern 3: Category Recommendation
-                cat_name = "Kitchen & Home" if category == "kitchen_home" else "Electronics" if category == "electronics" else "Trending Finds"
-                body = f"{emoji} Top recommendation in {cat_name}: {title} at {price}."
+                cat_name = "Home & Kitchen" if category == "kitchen_home" else "Electronics & Tech" if category == "electronics" else "Fashion & Style" if category == "fashion_lifestyle" else "Trending Amazon Finds"
+                body = f"{emoji} Top Pick in {cat_name}: {short_title}\n🏷️ Offer Price: {price}{mrp_note} | {discount_badge}"
             else:
-                # Pattern 4: Hand-picked Pin
-                body = f"{emoji} Hand-picked Amazon deal: {title} at {price}."
+                body = f"{emoji} Newly Added on WorldNewzs Amazon Deals: {short_title}\n🔥 Grab it at {price}{mrp_note} ({discount_badge})"
 
-            full_text = f"{body.strip()}\n\n{cta} {pin_url}\n\n{hashtags}".strip()
+            full_text = (
+                f"{body.strip()}\n\n"
+                f"{cta} {deal_url}\n"
+                f"🌐 More Deals: https://worldnewzs.in/amazon-products\n\n"
+                f"{hashtags}"
+            ).strip()
 
             if ledger is None or ledger.is_description_unique(full_text):
                 return {
@@ -389,17 +511,24 @@ class ContentShuffler:
                     "patternId": pattern_id,
                     "hashtags": hashtags,
                     "category": category,
-                    "pinUrl": pin_url
+                    "pinUrl": deal_url,
+                    "dealUrl": deal_url,
                 }
 
-        # Fallback if all 10 tries matched past hashes
         rand_salt = f"#{random.randint(100, 999)}"
         return {
-            "text": f"{random.choice(EMOJIS)} {title} ({price}) {rand_salt}\n\n{random.choice(CTAS)} {pin_url}\n\n{cls.sample_hashtags(category)}",
+            "text": (
+                f"{random.choice(EMOJIS)} {short_title}\n"
+                f"💰 Deal Price: {price}{mrp_note} ({discount_badge}) {rand_salt}\n\n"
+                f"{random.choice(CTAS)} {deal_url}\n"
+                f"🌐 More Deals: https://worldnewzs.in/amazon-products\n\n"
+                f"{cls.sample_hashtags(category)}"
+            ),
             "patternId": 0,
             "hashtags": cls.sample_hashtags(category),
             "category": category,
-            "pinUrl": pin_url
+            "pinUrl": deal_url,
+            "dealUrl": deal_url,
         }
 
 

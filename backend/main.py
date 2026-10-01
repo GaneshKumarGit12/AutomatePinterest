@@ -26,6 +26,7 @@ load_dotenv()
 
 from backend.engine.scraper import (
     get_deals_for_page,
+    get_unposted_facebook_deals,
     build_pinterest_share_url,
     load_products_dataset,
     sync_live_products,
@@ -188,11 +189,13 @@ class SocialPreviewRequest(BaseModel):
 
 
 class PinterestFacebookShareRequest(BaseModel):
-    pinCount: int = 10
+    pinCount: int = 6
     delaySeconds: int = 60
     targetBoardUrl: Optional[str] = None
     specificPinIds: Optional[List[str]] = None
     destination: Optional[str] = "both"  # "both", "page", "group"
+    startPage: Optional[int] = 1
+    endPage: Optional[int] = None
 
 
 @app.get("/api/status")
@@ -1266,13 +1269,15 @@ if not _fb_share_state.get("lastBatchResult"):
 
 
 async def run_pinterest_facebook_worker(
-    pin_count: int = 10,
+    pin_count: int = 6,
     delay_seconds: int = 60,
     target_board_url: Optional[str] = None,
     specific_pin_ids: Optional[List[str]] = None,
     destination: str = "both",
+    start_page: int = 1,
+    end_page: Optional[int] = None,
 ):
-    """Background worker for Pinterest → Facebook Page & Group share flow."""
+    """Background worker for WorldNewzs Amazon Products → Facebook Page & Group share flow."""
     global _fb_share_state
     next_run_id = int(_fb_share_state.get("runId") or 0) + 1
     _fb_share_state["isRunning"] = True
@@ -1283,6 +1288,7 @@ async def run_pinterest_facebook_worker(
     _fb_share_state["currentPin"] = 0
     _fb_share_state["totalPins"] = pin_count
     _fb_share_state["results"] = []
+    _fb_share_state["clearedAsins"] = []
     _fb_share_state["recentLogs"] = []
     _fb_share_state["error"] = None
     save_fb_share_state_snapshot()
@@ -1301,8 +1307,8 @@ async def run_pinterest_facebook_worker(
         broadcast_event("log", {"level": lvl, "message": msg})
         broadcast_event("social_log", log_entry)
 
-        # Track pin index from log messages
-        m_pin = re.search(r'Pin\s+#(\d+)(?:/(\d+))?', msg, re.I)
+        # Track product/deal index from log messages
+        m_pin = re.search(r'(?:Deal|Pin)\s+#(\d+)(?:/(\d+))?', msg, re.I)
         if m_pin:
             try:
                 _fb_share_state["currentPin"] = int(m_pin.group(1))
@@ -1323,7 +1329,7 @@ async def run_pinterest_facebook_worker(
             step_num = 4
         elif "Amazon Affiliate Group" in msg and "Publishing" in msg:
             step_num = 5
-        elif "successfully published" in msg.lower():
+        elif "successfully published" in msg.lower() or "published to" in msg.lower():
             step_num = 7
 
         if step_num is not None:
@@ -1335,18 +1341,29 @@ async def run_pinterest_facebook_worker(
                 "message": msg,
             })
 
-        if "Evaluating Pin" in msg or "Publishing" in msg or "Step" in msg:
+        if "Deal #" in msg or "Publishing" in msg or "Step" in msg:
             broadcast_event("fb_share_update", {
                 "message": msg,
                 "currentStep": _fb_share_state["currentStep"],
             })
 
     def stream_live_frame(frame_name: str):
+        url_with_ts = f"/api/social/live-frame?t={int(time.time()*1000)}"
+        _fb_share_state["lastLiveFrameUrl"] = url_with_ts
         broadcast_event("fb_live_frame", {
             "frame": frame_name,
-            "url": f"/api/social/live-frame?t={int(time.time()*1000)}",
+            "url": url_with_ts,
             "timestamp": time.time(),
         })
+
+    def on_item_cleared(cleared_item: Dict[str, Any]):
+        social_ledger.ensure_fresh()
+        c_asin = str(cleared_item.get("asin") or cleared_item.get("pinId") or "").strip().upper()
+        if c_asin:
+            cleared_list = _fb_share_state.setdefault("clearedAsins", [])
+            if c_asin not in cleared_list:
+                cleared_list.append(c_asin)
+        broadcast_event("fb_item_cleared", cleared_item)
 
     try:
         result = await execute_pinterest_facebook_share(
@@ -1355,10 +1372,18 @@ async def run_pinterest_facebook_worker(
             target_board_url=target_board_url,
             specific_pin_ids=specific_pin_ids,
             destination=destination,
+            start_page=start_page,
+            end_page=end_page,
+            page_size=6,
             log_fn=stream_log,
             live_frame_fn=stream_live_frame,
             should_stop_fn=lambda: bool(_fb_share_state.get("stopRequested")),
+            on_item_cleared_fn=on_item_cleared,
         )
+        # Ensure global social_ledger is reloaded and posted items are purged before notifying UI
+        social_ledger.ensure_fresh()
+        clean_res = clean_posted_pins_from_cache(social_ledger)
+
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         result["runId"] = next_run_id
         result["completedAt"] = completed_at
@@ -1377,6 +1402,8 @@ async def run_pinterest_facebook_worker(
             "skippedCount": result.get("skippedCount", 0),
             "failedCount": result.get("failedCount", 0),
             "durationSeconds": result.get("durationSeconds", 0),
+            "cleanedCount": clean_res.get("cleanedCount", result.get("cleanedCount", 0)),
+            "remainingCount": clean_res.get("remainingCount", result.get("remainingCount", 0)),
             "excelReport": result.get("excelReport"),
             "pdfReport": result.get("pdfReport"),
         }
@@ -1384,8 +1411,9 @@ async def run_pinterest_facebook_worker(
         broadcast_event("fb_share_complete", _fb_share_state["lastBatchResult"])
     except Exception as e:
         _fb_share_state["error"] = str(e)
-        stream_log("error", f"❌ Pinterest → Facebook share failed: {e}")
+        stream_log("error", f"❌ WorldNewzs → Facebook share failed: {e}")
     finally:
+        social_ledger.ensure_fresh()
         _fb_share_state["isRunning"] = False
         _fb_share_state["stopRequested"] = False
         save_fb_share_state_snapshot()
@@ -1397,14 +1425,16 @@ async def start_pinterest_facebook_share(
     req: PinterestFacebookShareRequest,
     background_tasks: BackgroundTasks,
 ):
-    """Triggers the Pinterest → Facebook Page & Group share flow."""
+    """Triggers the WorldNewzs Amazon Products → Facebook Page & Group share flow."""
     if _fb_share_state["isRunning"]:
         raise HTTPException(
             status_code=400,
-            detail="Pinterest → Facebook share is already running.",
+            detail="Facebook automation is already running.",
         )
 
     dest = req.destination or "both"
+    start_p = req.startPage or 1
+    end_p = req.endPage
     background_tasks.add_task(
         run_pinterest_facebook_worker,
         req.pinCount,
@@ -1412,21 +1442,26 @@ async def start_pinterest_facebook_share(
         req.targetBoardUrl,
         req.specificPinIds,
         dest,
+        start_p,
+        end_p,
     )
     dest_name = "WorldNewzs Page & Amazon Affiliate Group" if dest == "both" else "WorldNewzs Facebook Page Feed" if dest == "page" else "Amazon Affiliate Group"
+    page_desc = f"Page {start_p} to {end_p}" if (end_p and end_p >= start_p) else f"{req.pinCount} product(s)"
     return {
         "success": True,
-        "message": f"Pinterest → Facebook share started for {req.pinCount} unposted pin(s) to {dest_name} with {req.delaySeconds}s delay.",
+        "message": f"WorldNewzs Amazon Products → Facebook automation started ({page_desc}, 6/page) to {dest_name} with {req.delaySeconds}s interval.",
         "pinCount": req.pinCount,
         "delaySeconds": req.delaySeconds,
         "targetBoardUrl": req.targetBoardUrl,
         "destination": dest,
+        "startPage": start_p,
+        "endPage": end_p,
     }
 
 
 @app.post("/api/social/pinterest-facebook-stop")
 async def stop_pinterest_facebook_share():
-    """Signals the active Pinterest → Facebook share worker to stop cleanly and generate completion reports."""
+    """Signals the active Facebook share worker to stop cleanly and generate completion reports."""
     _fb_share_state["stopRequested"] = True
     return {
         "success": True,
@@ -1436,7 +1471,7 @@ async def stop_pinterest_facebook_share():
 
 @app.get("/api/social/pinterest-facebook-status")
 async def get_pinterest_facebook_status():
-    """Returns current Pinterest → Facebook share flow status and latest completion data."""
+    """Returns current Facebook share flow status and latest completion data."""
     return {
         **_fb_share_state,
         "results": (_fb_share_state.get("results") or [])[-50:],
@@ -1447,64 +1482,35 @@ async def get_pinterest_facebook_status():
 @app.get("/api/social/facebook-pins")
 async def get_facebook_pins_endpoint(
     page: int = Query(1, ge=1),
-    pageSize: int = Query(12, ge=1, le=100),
+    pageSize: int = Query(6, ge=1, le=50),
     filter: str = Query("pending"),
     forceRefresh: bool = Query(False),
 ):
     """
-    Returns lazy-loadable unposted Pinterest pins from Dhanvi Collection ready for Facebook automation.
-    Posted pins are cleaned out and never shown in Facebook Automation Hub.
+    Returns newly added / unposted Amazon products from worldnewzs.in/amazon-products,
+    paginated at 6 products per page (matching Amazon Deal Cards).
+    Previously posted products are automatically cleared from the active queue.
     """
-    clean_posted_pins_from_cache(social_ledger)
-
-    all_pins = await harvest_dhanvi_collection_pins(max_pins=300, force_live=forceRefresh)
-
-    # Strictly exclude any posted pins
-    unposted_pins = [p for p in all_pins if p.get("status") != "posted"]
-
-    total_count = len(unposted_pins)
-    total_pages = (total_count + pageSize - 1) // pageSize if total_count > 0 else 1
-    start_idx = (page - 1) * pageSize
-    paginated = unposted_pins[start_idx : start_idx + pageSize]
-
-    # Verification checkpoint: auto-repair any missing image URLs on the active page
-    cache_dirty = False
-    for p in paginated:
-        if not p.get("imageUrl") and p.get("pinId"):
-            resolved = resolve_pin_image_from_pinterest(p["pinId"], p.get("pinUrl", ""))
-            if resolved:
-                p["imageUrl"] = resolved
-                cache_dirty = True
-
-    if cache_dirty:
-        try:
-            with open(DHANVI_PINS_CACHE, "w", encoding="utf-8") as f:
-                json.dump(all_pins, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-
-    posted_count = len(social_ledger.get_facebook_posted_ids())
-
-    return {
-        "pins": paginated,
-        "totalCount": total_count,
-        "page": page,
-        "pageSize": pageSize,
-        "totalPages": total_pages,
-        "pendingCount": total_count,
-        "postedCount": posted_count,
-    }
+    social_ledger.ensure_fresh()
+    queue_data = get_unposted_facebook_deals(
+        page_number=page,
+        page_size=pageSize,
+        ledger=social_ledger,
+        force_sync=forceRefresh,
+    )
+    return queue_data
 
 
 @app.post("/api/social/clean-posted-pins")
 async def clean_posted_pins_endpoint():
     """
-    Purges all pins already posted to Facebook from the active Facebook Automation Hub cache.
+    Purges all products already posted to Facebook from the active Facebook Automation Hub queue.
     """
+    social_ledger.ensure_fresh()
     res = clean_posted_pins_from_cache(social_ledger)
     return {
         "success": True,
-        "message": f"Successfully cleaned {res['cleanedCount']} posted pin(s) from Facebook Automation Hub.",
+        "message": f"Successfully cleared {res['cleanedCount']} already-posted Amazon product(s) from the Facebook Hub queue ({res['remainingCount']} new products ready).",
         "cleanedCount": res["cleanedCount"],
         "remainingCount": res["remainingCount"],
         "totalBefore": res["totalBefore"],

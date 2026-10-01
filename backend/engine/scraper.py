@@ -153,6 +153,72 @@ def sanitize_image_url(image_url: str, asin: str = "") -> str:
     return image_url
 
 
+def format_amazon_product_card(p: Dict[str, Any], idx: int = 0, page_number: int = 1, serial_number: int = 1) -> Dict[str, Any]:
+    """Formats a raw WorldNewzs Amazon product into a unified Deal/Pin card object."""
+    raw_title = p.get("title") or p.get("name") or "Amazon Deal Product"
+    truncated, is_trunc = truncate_title(raw_title, 50)
+    price_val = p.get("price")
+    if isinstance(price_val, str) and "₹" in price_val:
+        price_str = price_val
+        try:
+            price_num = float(price_val.replace("₹", "").replace(",", "").strip())
+        except Exception:
+            price_num = 499.0
+    else:
+        price_num = float(price_val) if price_val else 499.0
+        price_str = f"₹{int(price_num):,}"
+
+    original_price_val = p.get("originalPrice")
+    if isinstance(original_price_val, str) and "₹" in original_price_val:
+        original_price_str = original_price_val
+        try:
+            orig_num = float(original_price_val.replace("₹", "").replace(",", "").strip())
+        except Exception:
+            orig_num = price_num * 1.5
+    else:
+        orig_num = float(original_price_val) if original_price_val else round(price_num * 1.5)
+        original_price_str = f"₹{int(orig_num):,}"
+
+    asin = str(p.get("asin") or f"P{page_number}C{idx+1}").strip()
+    product_url = p.get("productUrl") or p.get("dealUrl") or f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
+    raw_img = p.get("imageUrl") or f"https://m.media-amazon.com/images/P/{asin}.01._SCLZZZZZZZ_SX500_.jpg"
+    image_url = sanitize_image_url(raw_img, asin)
+
+    disc_val = p.get("discount")
+    if not disc_val and orig_num > price_num > 0:
+        disc_val = f"{round((1 - price_num / orig_num) * 100)}% OFF"
+    if not disc_val:
+        disc_val = "26% OFF"
+
+    category = p.get("category") or p.get("tag") or "AMAZON DEALS"
+    deal = {
+        "id": f"deal-p{page_number}-c{idx+1}-{asin}",
+        "pinId": asin,
+        "asin": asin,
+        "title": raw_title,
+        "truncatedTitle": truncated,
+        "isTruncated": is_trunc,
+        "price": price_str,
+        "originalPrice": original_price_str,
+        "discount": disc_val,
+        "category": category,
+        "tag": category,
+        "dealUrl": product_url,
+        "productUrl": product_url,
+        "pinUrl": product_url,
+        "imageUrl": image_url,
+        "pageNumber": page_number,
+        "cardIndex": idx,
+        "cardIndexOnPage": idx + 1,
+        "serialNumber": serial_number,
+        "dateAdded": p.get("dateAdded") or "",
+        "status": "pending",
+        "statusLabel": "Ready to Post",
+    }
+    deal["shareUrl"] = build_pinterest_share_url(deal)
+    return deal
+
+
 def get_deals_for_page(page_number: int = 1, page_size: int = 6) -> List[Dict[str, Any]]:
     """Returns 6 deals for the selected page index with 50-character truncated titles."""
     products = load_products_dataset()
@@ -165,43 +231,97 @@ def get_deals_for_page(page_number: int = 1, page_size: int = 6) -> List[Dict[st
 
     deals = []
     for idx, p in enumerate(slice_items):
-        raw_title = p.get("title") or p.get("name") or "Amazon Deal Product"
-        truncated, is_trunc = truncate_title(raw_title, 50)
-        price_val = p.get("price")
-        price_str = f"₹{int(price_val):,}" if price_val else "₹499"
-        original_price_val = p.get("originalPrice") or (int(price_val) * 1.5 if price_val else 899)
-        original_price_str = f"₹{int(original_price_val):,}"
-
-        asin = p.get("asin") or f"P{page_number}C{idx+1}"
-        product_url = p.get("productUrl") or f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
-        raw_img = p.get("imageUrl") or f"https://m.media-amazon.com/images/P/{asin}.01._SCLZZZZZZZ_SX500_.jpg"
-        image_url = sanitize_image_url(raw_img, asin)
-
-        disc_val = p.get("discount")
-        if not disc_val and price_val and original_price_val and float(original_price_val) > float(price_val):
-            disc_val = f"{round((1 - float(price_val) / float(original_price_val)) * 100)}% OFF"
-        if not disc_val:
-            disc_val = "26% OFF"
-
-        deal = {
-            "id": f"deal-p{page_number}-c{idx+1}-{asin}",
-            "asin": asin,
-            "title": raw_title,
-            "truncatedTitle": truncated,
-            "isTruncated": is_trunc,
-            "price": price_str,
-            "originalPrice": original_price_str,
-            "discount": disc_val,
-            "tag": p.get("category") or "AMAZON DEALS",
-            "dealUrl": product_url,
-            "imageUrl": image_url,
-            "pageNumber": page_number,
-            "cardIndex": idx,
-        }
-        deal["shareUrl"] = build_pinterest_share_url(deal)
-        deals.append(deal)
+        serial_num = start_idx + idx + 1
+        deals.append(format_amazon_product_card(p, idx=idx, page_number=page_number, serial_number=serial_num))
 
     return deals
+
+
+def get_unposted_facebook_deals(
+    page_number: int = 1,
+    page_size: int = 6,
+    ledger: Any = None,
+    force_sync: bool = False,
+) -> Dict[str, Any]:
+    """
+    Returns ONLY newly added / unposted Amazon products from worldnewzs.in/amazon-products,
+    paginated at 6 products per page (matching Amazon Deal Cards).
+    Products already posted to Facebook are automatically filtered out and cleared.
+    """
+    if force_sync:
+        sync_live_products()
+
+    if ledger is None:
+        try:
+            from backend.engine.social_manager import DeduplicationLedger
+            ledger = DeduplicationLedger()
+        except Exception:
+            ledger = None
+    elif hasattr(ledger, "ensure_fresh"):
+        ledger.ensure_fresh()
+
+    products = load_products_dataset(force_refresh=force_sync)
+    if not products:
+        return {
+            "deals": [],
+            "pins": [],
+            "page": page_number,
+            "pageSize": page_size,
+            "totalPages": 1,
+            "totalCount": 0,
+            "pendingCount": 0,
+            "postedCount": 0,
+            "totalCatalog": 0,
+        }
+
+    unposted_raw = []
+    posted_count = 0
+    seen_asins = set()
+
+    for p in products:
+        asin = str(p.get("asin") or "").strip()
+        p_url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+        p_title = str(p.get("title") or p.get("name") or "").strip()
+        if asin and asin in seen_asins:
+            continue
+        if asin:
+            seen_asins.add(asin)
+
+        is_posted = False
+        if ledger is not None:
+            is_posted = ledger.is_posted_to_facebook(asin, p_url, p_title)
+
+        if is_posted:
+            posted_count += 1
+        else:
+            unposted_raw.append(p)
+
+    total_unposted = len(unposted_raw)
+    total_pages = max(1, (total_unposted + page_size - 1) // page_size)
+    safe_page = min(max(1, page_number), total_pages)
+
+    start_idx = (safe_page - 1) * page_size
+    end_idx = start_idx + page_size
+    slice_items = unposted_raw[start_idx:end_idx]
+
+    page_deals = []
+    for idx, p in enumerate(slice_items):
+        serial_num = start_idx + idx + 1
+        page_deals.append(
+            format_amazon_product_card(p, idx=idx, page_number=safe_page, serial_number=serial_num)
+        )
+
+    return {
+        "deals": page_deals,
+        "pins": page_deals,
+        "page": safe_page,
+        "pageSize": page_size,
+        "totalPages": total_pages,
+        "totalCount": total_unposted,
+        "pendingCount": total_unposted,
+        "postedCount": posted_count,
+        "totalCatalog": len(seen_asins),
+    }
 
 
 def build_pinterest_share_url(deal: Dict[str, Any]) -> str:
@@ -218,3 +338,4 @@ def build_pinterest_share_url(deal: Dict[str, Any]) -> str:
         "description": desc,
     }
     return f"https://in.pinterest.com/pin/create/button/?{urllib.parse.urlencode(params)}"
+

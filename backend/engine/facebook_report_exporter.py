@@ -100,21 +100,21 @@ def export_facebook_shares_excel(
     )
 
     # Title Block
-    ws["A1"] = "AutomatePinterest — Facebook Group Share Live Proof Report"
+    ws["A1"] = "AutomatePinterest — Facebook Hub (WorldNewzs Amazon Products) Live Proof Report"
     ws["A1"].font = title_font
     ws["A2"] = (
         f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-        f"Source: Dhanvi Collections (in.pinterest.com/ganeshkumardevarasetty) | "
-        f"Target: Worldnewzs -> Amazon Affiliate Group"
+        f"Source: WorldNewzs Amazon Deals (https://worldnewzs.in/amazon-products) | "
+        f"Target: WorldNewzs Page -> Amazon Affiliate Group"
     )
     ws["A2"].font = subtitle_font
 
     headers = [
         "S.No",
-        "Pin ID",
+        "ASIN / ID",
         "Product Title",
-        "Pinterest URL",
-        "Target Facebook Group",
+        "Amazon.in Deal URL",
+        "Target Facebook Destination",
         "Status",
         "Date & Time",
         "Post Text / Deal Copy",
@@ -134,10 +134,10 @@ def export_facebook_shares_excel(
     current_row = 5
     for idx, r in enumerate(results, 1):
         status_val = (r.get("status") or "success").upper()
-        pin_id = str(r.get("pinId") or "")
-        pin_url = r.get("pinUrl") or (f"https://in.pinterest.com/pin/{pin_id}/" if pin_id else "")
+        pin_id = str(r.get("asin") or r.get("pinId") or "")
+        pin_url = r.get("dealUrl") or r.get("pinUrl") or (f"https://www.amazon.in/dp/{pin_id}?tag=ganeshd12-21" if pin_id else "")
         title = r.get("title") or ""
-        target = r.get("target") or "Worldnewzs -> Amazon Affiliate Group"
+        target = r.get("target") or "WorldNewzs Page + Amazon Affiliate Group"
         timestamp = r.get("date") or r.get("timestamp") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         post_text = r.get("content") or r.get("text") or ""
         proof_img = r.get("screenshotPath") or (f"verified_fb_group_pin_{pin_id}.png" if pin_id else "")
@@ -146,7 +146,7 @@ def export_facebook_shares_excel(
         ws.cell(row=current_row, column=2, value=pin_id).alignment = Alignment(horizontal="center", vertical="center")
         ws.cell(row=current_row, column=3, value=title).alignment = Alignment(horizontal="left", vertical="center")
         
-        # Hyperlinked Pinterest URL
+        # Hyperlinked Amazon Deal URL
         url_cell = ws.cell(row=current_row, column=4, value=pin_url)
         url_cell.alignment = Alignment(horizontal="left", vertical="center")
         if pin_url.startswith("http"):
@@ -258,12 +258,12 @@ def generate_facebook_pdf_report(
     story = []
 
     # Header
-    story.append(Paragraph("AutomatePinterest — Facebook Group Share Activity Report", title_style))
+    story.append(Paragraph("AutomatePinterest — Facebook Hub (WorldNewzs Amazon Products) Activity Report", title_style))
     story.append(
         Paragraph(
             f"Generated on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"Target: Worldnewzs → Amazon Affiliate Group | "
-            f"Source Profile: Dhanvi Collections (in.pinterest.com/ganeshkumardevarasetty)",
+            f"Target: WorldNewzs Page → Amazon Affiliate Group | "
+            f"Source: https://worldnewzs.in/amazon-products (6 Products/Page)",
             subtitle_style,
         )
     )
@@ -277,7 +277,7 @@ def generate_facebook_pdf_report(
     duration_sec = summary.get("durationSeconds", 0)
 
     summary_data = [
-        ["Requested Pins", "Successfully Posted", "Skipped (Already on FB)", "Failed", "Duration"],
+        ["Requested Products", "Successfully Posted", "Skipped (Already on FB)", "Failed", "Duration"],
         [
             str(total_requested),
             str(success_cnt),
@@ -306,17 +306,17 @@ def generate_facebook_pdf_report(
     story.append(summary_table)
     story.append(Spacer(1, 12))
 
-    # Processed Pins Table
-    story.append(Paragraph("Completed Pins & Live Facebook Group Proofs", section_heading))
+    # Processed Products Table
+    story.append(Paragraph("Completed Amazon Products & Live Facebook Proofs", section_heading))
 
     table_data = [
-        ["#", "Pin ID", "Product Title", "Target Group", "Status"]
+        ["#", "ASIN / ID", "Product Title", "Target Destination", "Status"]
     ]
 
     for idx, r in enumerate(results, 1):
-        pin_id = str(r.get("pinId") or "N/A")
-        title = r.get("title") or "Pinterest Deal"
-        target = "Amazon Affiliate Group"
+        pin_id = str(r.get("asin") or r.get("pinId") or "N/A")
+        title = r.get("title") or "Amazon Deal"
+        target = r.get("target") or "WorldNewzs Page + Group"
         status = (r.get("status") or "success").upper()
 
         table_data.append(
@@ -324,7 +324,7 @@ def generate_facebook_pdf_report(
                 str(idx),
                 pin_id,
                 Paragraph(title[:60], body_style),
-                target,
+                target[:26],
                 status,
             ]
         )
