@@ -1365,7 +1365,10 @@ async def execute_pinterest_facebook_share(
                     )
                     page_proof = page_res.get("screenshotPath")
 
-                if destination in ["both", "group"]:
+                # Early-exit checkpoint if stop was requested during Page publish
+                if destination in ["both", "group"] and should_stop_fn and should_stop_fn():
+                    log("warning", "⏹️ Stop requested by user. Skipping group publish to finish batch immediately...")
+                elif destination in ["both", "group"]:
                     log("info", f"👥 Step 5/7: Publishing Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) to {FB_GROUP_NAME}...")
                     group_res = await _publish_to_facebook_group(
                         page=fb_action_page,

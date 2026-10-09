@@ -392,6 +392,68 @@ class DeduplicationLedger:
         self.data.setdefault("post_logs", []).append(log_entry)
         self._save()
 
+    def mark_all_current_products_as_posted_to_facebook(self, products: List[Dict[str, Any]]) -> int:
+        """
+        Marks all provided Amazon products as posted to Facebook.
+        Clears them from the pending Facebook Automation Hub queue.
+        """
+        self.ensure_fresh()
+        fb_pins = self.data.setdefault("facebook_posted_pin_ids", [])
+        fb_records = self.data.setdefault("facebook_post_records", [])
+        post_logs = self.data.setdefault("post_logs", [])
+
+        existing_asins = set(self._fb_asins_set)
+        count_added = 0
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now_date = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        for p in products:
+            asin = str(p.get("asin") or "").strip()
+            url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+            title = str(p.get("title") or p.get("name") or "").strip()
+            if not asin and not url:
+                continue
+
+            if asin and asin not in existing_asins:
+                existing_asins.add(asin)
+                count_added += 1
+                if asin not in fb_pins:
+                    fb_pins.append(asin)
+                if url and url not in fb_pins:
+                    fb_pins.append(url)
+
+                rec = {
+                    "id": f"fb-bulk-clear-{asin}",
+                    "timestamp": now_iso,
+                    "date": now_date,
+                    "pinId": asin,
+                    "asin": asin,
+                    "pinUrl": url,
+                    "dealUrl": url,
+                    "title": title,
+                    "content": f"Already posted to Facebook page: {title}",
+                    "target": "WorldNewzs Facebook Page & Group",
+                    "status": "success",
+                    "error": ""
+                }
+                fb_records.append(rec)
+                post_logs.append({
+                    "id": rec["id"],
+                    "timestamp": now_iso,
+                    "platform": "facebook",
+                    "target": "WorldNewzs Facebook Page & Group",
+                    "pinId": asin,
+                    "asin": asin,
+                    "pinUrl": url,
+                    "dealUrl": url,
+                    "title": title,
+                    "status": "success",
+                    "error": ""
+                })
+
+        self._save()
+        return count_added
+
     def get_facebook_records(self) -> List[Dict[str, Any]]:
         """Returns all completed/logged Facebook share records."""
         self.ensure_fresh()

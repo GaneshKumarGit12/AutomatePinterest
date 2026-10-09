@@ -1517,6 +1517,31 @@ async def clean_posted_pins_endpoint():
     }
 
 
+@app.post("/api/social/clear-all-facebook-pins")
+async def clear_all_facebook_pins_endpoint():
+    """
+    Marks ALL Amazon products currently in the catalog as posted to Facebook.
+    Clears the entire Facebook Automation Hub queue so only newly added products will appear.
+    """
+    from backend.engine.scraper import load_products_dataset
+    products = load_products_dataset(force_refresh=False)
+    social_ledger.ensure_fresh()
+    cleared_count = social_ledger.mark_all_current_products_as_posted_to_facebook(products)
+    res = clean_posted_pins_from_cache(social_ledger)
+    broadcast_event("fb_share_complete", {
+        "success": True,
+        "message": f"All {cleared_count} products marked as posted and cleared.",
+        "cleanedCount": res["cleanedCount"],
+        "remainingCount": res["remainingCount"],
+    })
+    return {
+        "success": True,
+        "message": f"Successfully marked all {cleared_count} Amazon product(s) as already posted to Facebook. Facebook Hub queue is now cleared.",
+        "cleanedCount": res["cleanedCount"],
+        "remainingCount": res["remainingCount"],
+    }
+
+
 @app.get("/api/social/export-excel")
 async def export_excel_endpoint():
     """Downloads formatted Excel (.xlsx) report of completed Facebook shares."""

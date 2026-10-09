@@ -89,6 +89,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   const [fbShareDelay, setFbShareDelay] = useState<number>(60);
   const [fbDestination, setFbDestination] = useState<'both' | 'page' | 'group'>('both');
   const [isFbShareRunning, setIsFbShareRunning] = useState<boolean>(false);
+  const [isStopping, setIsStopping] = useState<boolean>(false);
   const [fbShareStep, setFbShareStep] = useState<{ step: number; message: string } | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ text: string; severity: 'info' | 'success' | 'warning' | 'error' } | null>(null);
   const [socialLogs, setSocialLogs] = useState<Array<{ level: string; message: string; timestamp: string }>>([]);
@@ -159,6 +160,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     }
     wasRunningRef.current = false;
     setIsFbShareRunning(false);
+    setIsStopping(false);
     setFbShareStep(null);
     setCompletedModalOpen(true);
     setSelectedPinIds(new Set());
@@ -253,6 +255,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           await handleBatchComplete(status.lastBatchResult);
         } else {
           setIsFbShareRunning(false);
+          setIsStopping(false);
           setFbShareStep(null);
           if (status.lastBatchResult && !lastBatchResult) {
             setLastBatchResult(status.lastBatchResult);
@@ -427,13 +430,15 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
   };
 
   const handleStopFacebookShare = async () => {
+    setIsStopping(true);
+    setStatusMessage({
+      text: '⏹️ Stopping Facebook Share... Finishing current step, auto-clearing queue, and generating Excel & PDF reports...',
+      severity: 'warning',
+    });
     try {
       await api.stopPinterestFacebookShare();
-      setStatusMessage({
-        text: '⏹️ Stopping Facebook Share after current action and generating Excel & PDF reports...',
-        severity: 'warning',
-      });
     } catch (err: any) {
+      setIsStopping(false);
       setStatusMessage({
         text: `Stop request error: ${err.message || err}`,
         severity: 'error',
@@ -487,6 +492,33 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     } catch (err: any) {
       setStatusMessage({
         text: `Failed to clean posted products: ${err.message || err}`,
+        severity: 'error',
+      });
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleClearAllProducts = async () => {
+    if (
+      !window.confirm(
+        'Are you sure you want to remove ALL products from the Facebook Automation Hub queue?\n\nThey will be recorded as already posted in your target Facebook page. New products will automatically appear when added to worldnewzs.in/amazon-products.'
+      )
+    ) {
+      return;
+    }
+    setIsCleaning(true);
+    try {
+      const res = await api.clearAllFacebookPins();
+      setStatusMessage({
+        text: `🗑️ ${res.message || 'All products marked as posted and removed from Facebook Automation Hub!'}`,
+        severity: 'success',
+      });
+      await fetchDhanviPins(1, pinFilterRef.current, false);
+      await fetchHistory();
+    } catch (err: any) {
+      setStatusMessage({
+        text: `Failed to remove all products: ${err.message || err}`,
         severity: 'error',
       });
     } finally {
@@ -797,7 +829,9 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               variant="contained"
               size="medium"
               color="error"
+              disabled={isStopping}
               onClick={handleStopFacebookShare}
+              startIcon={isStopping ? <CircularProgress size={16} color="inherit" /> : undefined}
               sx={{
                 fontWeight: 800,
                 textTransform: 'none',
@@ -807,7 +841,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                 fontSize: '0.84rem',
               }}
             >
-              ⏹️ Stop & Finish
+              {isStopping ? '⏳ Stopping & Finishing...' : '⏹️ Stop & Finish'}
             </Button>
           )}
 
@@ -880,6 +914,31 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               }}
             >
               {isCleaning ? 'Cleaning...' : '🧹 Clear Posted'}
+            </Button>
+          </Tooltip>
+
+          {/* Remove All Products from Hub (Mark all as already posted to Facebook) */}
+          <Tooltip title="Remove all products from the Facebook Automation Hub queue (marks them as already posted in your target Facebook page)">
+            <Button
+              variant="outlined"
+              size="medium"
+              startIcon={isCleaning ? <CircularProgress size={15} color="inherit" /> : <DeleteSweepIcon />}
+              onClick={handleClearAllProducts}
+              disabled={isCleaning || isFbShareRunning}
+              sx={{
+                borderColor: '#FCA5A5',
+                color: '#DC2626',
+                fontWeight: 700,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
+                bgcolor: '#FEF2F2',
+                '&:hover': { bgcolor: '#FEE2E2', borderColor: '#B91C1C' },
+              }}
+            >
+              🗑️ Remove All (Mark as Posted)
             </Button>
           </Tooltip>
 

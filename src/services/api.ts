@@ -259,6 +259,12 @@ export const api = {
     return res.data;
   },
 
+  // Mark all Amazon products currently in the catalog as posted to Facebook and clear the hub queue
+  clearAllFacebookPins: async () => {
+    const res = await client.post('/api/social/clear-all-facebook-pins');
+    return res.data;
+  },
+
   getExportExcelUrl: () => `${activeApiBase}/api/social/export-excel`,
   getExportPdfUrl: () => `${activeApiBase}/api/social/export-pdf`,
   getLiveFrameUrl: () => `${activeApiBase}/api/social/live-frame?t=${Date.now()}`,
