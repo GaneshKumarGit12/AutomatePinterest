@@ -141,6 +141,12 @@ export const api = {
     return res.data;
   },
 
+  // Mark all products currently in catalog as moved/pinned to Pinterest
+  clearAllPinnedDeals: async () => {
+    const res = await client.post('/api/deals/clear-all-pinned');
+    return res.data;
+  },
+
   // Sync deals from WorldNewzs live API
   syncDeals: async () => {
     const res = await client.post('/api/deals/sync');

@@ -218,3 +218,52 @@ class PinterestLedger:
             "pinnedCount": len(self._pinned_asins),
             "timestamp": self.data["last_cleaned_at"],
         }
+
+    def clear_all_pinned(self) -> Dict[str, Any]:
+        """
+        Marks ALL products currently in the catalog as moved/pinned to Pinterest.
+        Clears the pending queue immediately so only brand new deals will appear when synced.
+        """
+        self.ensure_fresh()
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        marked_count = 0
+
+        if os.path.exists(AMAZON_PRODUCTS_JSON):
+            try:
+                with open(AMAZON_PRODUCTS_JSON, "r", encoding="utf-8") as f:
+                    cat_data = json.load(f)
+                products = cat_data.get("products", []) if isinstance(cat_data, dict) else cat_data
+                for idx, p in enumerate(products):
+                    asin = str(p.get("asin") or "").strip().upper()
+                    if not asin:
+                        asin = f"DEAL-CAT-{idx+1:04d}"
+                    title = str(p.get("title") or "").strip()
+                    if asin not in self._pinned_asins:
+                        self.data["pinned_asins"].append(asin)
+                        self.data["pinned_records"].append({
+                            "asin": asin,
+                            "title": title,
+                            "price": str(p.get("price") or ""),
+                            "originalPrice": str(p.get("originalPrice") or ""),
+                            "discount": str(p.get("discount") or ""),
+                            "dealUrl": str(p.get("productUrl") or p.get("dealUrl") or ""),
+                            "imageUrl": str(p.get("imageUrl") or ""),
+                            "pinnedAt": now_iso,
+                            "source": "clear_all_action",
+                            "catalogIndex": idx + 1,
+                        })
+                        marked_count += 1
+            except Exception as e:
+                print(f"[PinterestLedger] Error in clear_all_pinned: {e}")
+
+        self.data["last_cleaned_at"] = now_iso
+        self._save()
+        self._rebuild_lookup_cache()
+        return {
+            "success": True,
+            "markedCount": marked_count,
+            "totalPinned": len(self._pinned_asins),
+            "remainingPending": 0,
+            "message": f"Successfully marked all {len(self._pinned_asins)} products as moved to Pinterest. Active queue is cleared.",
+        }
+

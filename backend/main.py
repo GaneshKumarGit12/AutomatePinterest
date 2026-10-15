@@ -274,6 +274,21 @@ async def mark_deals_pinned_endpoint(payload: Dict[str, Any]):
     }
 
 
+@app.post("/api/deals/clear-all-pinned")
+async def clear_all_pinned_deals_endpoint():
+    """
+    Marks ALL Amazon products currently in the catalog as moved/pinned to Pinterest.
+    Clears the entire active Pinterest queue immediately.
+    """
+    pinterest_ledger.ensure_fresh()
+    res = pinterest_ledger.clear_all_pinned()
+    broadcast_event("log", {
+        "level": "success",
+        "message": f"🗑️ [Pinterest Clear All] {res.get('message')}"
+    })
+    return res
+
+
 @app.post("/api/deals/sync")
 async def sync_deals_endpoint():
     """Syncs live Amazon deals directly from WorldNewzs into AutomatePinterest."""

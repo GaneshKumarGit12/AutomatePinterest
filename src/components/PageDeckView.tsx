@@ -202,6 +202,30 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
     }
   };
 
+  const handleClearAllPinned = async () => {
+    if (
+      !window.confirm(
+        'Are you sure you want to mark ALL products as moved to Pinterest?\n\nThis will clear the active queue and record all catalog products as already moved to Pinterest. New products will automatically appear when synced from WorldNewzs.'
+      )
+    ) {
+      return;
+    }
+    setIsCleaning(true);
+    try {
+      const res = await api.clearAllPinnedDeals();
+      if (res && typeof res.totalPinned === 'number') {
+        setPinnedCount(res.totalPinned);
+        setPendingCount(0);
+      }
+      onPageChange(1);
+      await fetchPageDeals(1, pinFilter);
+    } catch (err: any) {
+      console.error('Failed to clear all pinned deals:', err);
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
   const handleSyncDeals = async () => {
     setIsSyncing(true);
     try {
@@ -310,7 +334,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
             disabled={runState.isRunning}
           />
 
-          <Tooltip title="Verify and purge all 508+ already-pinned products from the active queue">
+          <Tooltip title="Verify and purge all already-pinned products from the active queue">
             <Button
               variant="outlined"
               size="small"
@@ -331,6 +355,30 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               }}
             >
               {isCleaning ? 'Cleaning...' : '🧹 Clean Pinned'}
+            </Button>
+          </Tooltip>
+
+          <Tooltip title="Remove all products from the active Pinterest queue (marks all catalog products as already moved to Pinterest)">
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={isCleaning ? <CircularProgress size={15} color="inherit" /> : <DeleteSweepIcon />}
+              onClick={handleClearAllPinned}
+              disabled={isCleaning || runState.isRunning || (pinFilter === 'pending' && deals.length === 0)}
+              sx={{
+                borderColor: '#FCA5A5',
+                color: '#DC2626',
+                fontWeight: 700,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
+                bgcolor: '#FEF2F2',
+                '&:hover': { bgcolor: '#FEE2E2', borderColor: '#B91C1C' },
+              }}
+            >
+              {isCleaning ? 'Processing...' : '🗑️ Remove All (Mark as Moved)'}
             </Button>
           </Tooltip>
 
@@ -657,6 +705,56 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
             </Grid>
           ))}
         </Grid>
+      ) : deals.length === 0 ? (
+        <Paper
+          elevation={0}
+          sx={{
+            mt: 3,
+            p: 4,
+            textAlign: 'center',
+            borderRadius: 3,
+            border: '1.5px dashed #cbd5e1',
+            bgcolor: '#f8fafc',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 1.5,
+          }}
+        >
+          <Box sx={{ bgcolor: '#dcfce7', p: 1.5, borderRadius: '50%', color: '#16a34a', display: 'flex' }}>
+            <CheckCircleIcon sx={{ fontSize: 40 }} />
+          </Box>
+          <Typography variant="h6" fontWeight={800} color="#0f172a">
+            {pinFilter === 'pending'
+              ? 'All Products Moved to Pinterest!'
+              : 'No Products in this View'}
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 540 }}>
+            {pinFilter === 'pending'
+              ? 'All catalog deals have been moved to Pinterest (Dhanvi Collections). Fresh deals will automatically appear here when added to WorldNewzs.'
+              : 'Switch to another filter tab above or sync deals to load products.'}
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 1.5, mt: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+            <Button
+              variant="contained"
+              size="small"
+              onClick={() => handleFilterChange('pinned')}
+              sx={{ bgcolor: '#059669', fontWeight: 700, textTransform: 'none', borderRadius: 2, '&:hover': { bgcolor: '#047857' } }}
+            >
+              View Moved Deals ({pinnedCount})
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={handleSyncDeals}
+              startIcon={<SyncIcon />}
+              sx={{ fontWeight: 700, textTransform: 'none', borderRadius: 2 }}
+            >
+              Sync Live Deals
+            </Button>
+          </Box>
+        </Paper>
       ) : (
         <Grid container spacing={2.5} sx={{ mt: 1 }}>
           {deals.map((deal, idx) => {
