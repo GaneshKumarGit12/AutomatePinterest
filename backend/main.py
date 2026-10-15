@@ -289,24 +289,49 @@ async def clear_all_pinned_deals_endpoint():
     return res
 
 
+@app.post("/api/deals/restore-latest")
+async def restore_latest_deals_endpoint(payload: Optional[Dict[str, Any]] = None):
+    """
+    Restores only the latest 48 deals from worldnewzs.in into the active Ready to Pin queue,
+    keeping all remaining 3,048 older deals marked as moved to Pinterest.
+    """
+    count = 48
+    if payload and isinstance(payload.get("count"), int) and payload.get("count") > 0:
+        count = payload.get("count")
+    pinterest_ledger.ensure_fresh()
+    res = pinterest_ledger.restore_latest_deals(latest_count=count)
+    broadcast_event("log", {
+        "level": "success",
+        "message": f"🔄 [Pinterest Restore] {res.get('message')}"
+    })
+    return res
+
+
 @app.post("/api/deals/sync")
 async def sync_deals_endpoint():
-    """Syncs live Amazon deals directly from WorldNewzs into AutomatePinterest."""
+    """Syncs live Amazon deals directly from WorldNewzs into AutomatePinterest with full ledger status."""
     res = sync_live_products()
-    total_products = res.get("totalProducts", len(load_products_dataset()))
+    products = load_products_dataset(force_refresh=True)
+    total_products = len(products)
     total_pages = (total_products + 6 - 1) // 6 if total_products > 0 else 1
+
+    pinterest_ledger.ensure_fresh()
+    counts = pinterest_ledger.get_counts(total_catalog=total_products)
 
     broadcast_event("log", {
         "level": "success" if res.get("success") else "warning",
-        "message": f"🔄 [Deals Sync] WorldNewzs sync complete: {total_products} total deals across {total_pages} pages."
+        "message": f"🔄 [Deals Sync] WorldNewzs sync complete: {counts['pendingCount']} ready to pin, {counts['pinnedCount']} moved to Pinterest (total {total_products})."
     })
 
     return {
         "success": res.get("success", False),
         "totalProducts": total_products,
         "totalPages": total_pages,
-        "message": res.get("message") or f"Synced {total_products} products from WorldNewzs.",
+        "readyCount": counts["pendingCount"],
+        "pinnedCount": counts["pinnedCount"],
+        "message": res.get("message") or f"Synced {total_products} products from WorldNewzs ({counts['pendingCount']} ready to pin).",
     }
+
 
 
 async def get_healthy_context(current_ctx=None):

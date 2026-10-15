@@ -267,3 +267,82 @@ class PinterestLedger:
             "message": f"Successfully marked all {len(self._pinned_asins)} products as moved to Pinterest. Active queue is cleared.",
         }
 
+    def restore_latest_deals(self, latest_count: int = 48) -> Dict[str, Any]:
+        """
+        Configures the ledger so that ONLY the latest `latest_count` deals (48)
+        from worldnewzs.in/amazon-products are unpinned and ready to pin.
+        All remaining older products (3,048) are recorded as moved to Pinterest.
+        """
+        self.ensure_fresh()
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        if not os.path.exists(AMAZON_PRODUCTS_JSON):
+            return {"success": False, "error": "Catalog file not found."}
+
+        with open(AMAZON_PRODUCTS_JSON, "r", encoding="utf-8") as f:
+            cat_data = json.load(f)
+        products = cat_data.get("products", []) if isinstance(cat_data, dict) else cat_data
+
+        latest_deals = products[:latest_count]
+        older_deals = products[latest_count:]
+
+        latest_asins = {
+            str(p.get("asin") or "").strip().upper()
+            for p in latest_deals
+            if str(p.get("asin") or "").strip()
+        }
+        latest_titles = {
+            str(p.get("title") or "").strip().lower()[:60]
+            for p in latest_deals
+            if str(p.get("title") or "").strip()
+        }
+
+        # Reset pinned collections completely
+        self.data["pinned_asins"] = []
+        self.data["pinned_records"] = []
+        self._pinned_asins = set()
+        self._pinned_titles = set()
+
+        for idx, p in enumerate(older_deals, start=latest_count + 1):
+            asin = str(p.get("asin") or "").strip().upper()
+            if not asin:
+                asin = f"DEAL-OLD-{idx:04d}"
+            # Prevent pinning an ASIN belonging to the latest active deals
+            if asin in latest_asins:
+                continue
+            if asin not in self.data["pinned_asins"]:
+                self.data["pinned_asins"].append(asin)
+
+            raw_title = str(p.get("title") or "").strip()
+            norm_title = raw_title.lower()[:60]
+            # Avoid title collision so new products with similar names remain active
+            saved_title = raw_title if norm_title not in latest_titles else f"[ARCHIVED] {raw_title}"
+
+            self.data["pinned_records"].append({
+                "asin": asin,
+                "title": saved_title,
+                "price": str(p.get("price") or ""),
+                "originalPrice": str(p.get("originalPrice") or ""),
+                "discount": str(p.get("discount") or ""),
+                "dealUrl": str(p.get("productUrl") or p.get("dealUrl") or ""),
+                "imageUrl": str(p.get("imageUrl") or ""),
+                "pinnedAt": now_iso,
+                "source": "older_catalog_moved",
+                "dealIndex": idx,
+            })
+
+        self.data["last_cleaned_at"] = now_iso
+        self._save()
+        self._rebuild_lookup_cache()
+
+        ready_count = len(latest_deals)
+        moved_count = len(older_deals)
+        return {
+            "success": True,
+            "readyCount": ready_count,
+            "pinnedCount": moved_count,
+            "totalCatalog": len(products),
+            "message": f"Successfully restored {ready_count} latest deals to Ready to Pin. {moved_count} older deals remain in Moved to Pinterest.",
+        }
+
+

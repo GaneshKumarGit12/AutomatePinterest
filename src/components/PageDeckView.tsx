@@ -15,6 +15,8 @@ import {
   Skeleton,
   TextField,
   Checkbox,
+  Snackbar,
+  Alert,
 } from '@mui/material';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ShareIcon from '@mui/icons-material/Share';
@@ -57,6 +59,13 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isCleaning, setIsCleaning] = useState<boolean>(false);
+  const [isRestoring, setIsRestoring] = useState<boolean>(false);
+
+  // Toast / Snackbar feedback states
+  const [toastMessage, setToastMessage] = useState<string>('');
+  const [toastSeverity, setToastSeverity] = useState<'success' | 'info' | 'warning' | 'error'>('info');
+  const [toastOpen, setToastOpen] = useState<boolean>(false);
+  const [toastAction, setToastAction] = useState<React.ReactNode | null>(null);
 
   // Page range automation controller states
   const [rangeStart, setRangeStart] = useState<number>(1);
@@ -202,10 +211,35 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
     }
   };
 
+  const handleRestoreLatestDeals = async (count: number = 48) => {
+    setIsRestoring(true);
+    try {
+      const res = await api.restoreLatestDeals(count);
+      if (res && res.success) {
+        setPendingCount(res.readyCount || count);
+        setPinnedCount(res.pinnedCount || 3048);
+        setPinFilter('pending');
+        onPageChange(1);
+        await fetchPageDeals(1, 'pending');
+        setToastMessage(`✅ Restored ${res.readyCount || count} latest deals from WorldNewzs into the Ready to Pin queue.`);
+        setToastSeverity('success');
+        setToastAction(null);
+        setToastOpen(true);
+      }
+    } catch (err) {
+      console.error('Failed to restore latest deals:', err);
+      setToastMessage('Failed to restore deals. Please try again.');
+      setToastSeverity('error');
+      setToastOpen(true);
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
   const handleClearAllPinned = async () => {
     if (
       !window.confirm(
-        'Are you sure you want to mark ALL products as moved to Pinterest?\n\nThis will clear the active queue and record all catalog products as already moved to Pinterest. New products will automatically appear when synced from WorldNewzs.'
+        'Are you sure you want to mark ALL products as moved to Pinterest?\n\nThis will clear the active queue and record all catalog products as already moved to Pinterest.'
       )
     ) {
       return;
@@ -219,6 +253,22 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
       }
       onPageChange(1);
       await fetchPageDeals(1, pinFilter);
+      setToastMessage('🗑️ All products marked as moved. Queue cleared.');
+      setToastSeverity('warning');
+      setToastAction(
+        <Button
+          color="inherit"
+          size="small"
+          onClick={() => {
+            setToastOpen(false);
+            handleRestoreLatestDeals(48);
+          }}
+          sx={{ fontWeight: 800, textTransform: 'none', color: '#fef08a' }}
+        >
+          UNDO (Restore 48)
+        </Button>
+      );
+      setToastOpen(true);
     } catch (err: any) {
       console.error('Failed to clear all pinned deals:', err);
     } finally {
@@ -233,13 +283,24 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
       if (res && res.success) {
         setTotalProducts(res.totalProducts);
         setTotalPages(res.totalPages);
+        if (typeof res.readyCount === 'number') setPendingCount(res.readyCount);
+        if (typeof res.pinnedCount === 'number') setPinnedCount(res.pinnedCount);
         await fetchPageDeals(selectedPage, pinFilter);
         if (onSync) {
           await onSync();
         }
+        setToastMessage(
+          `🔄 Synced from WorldNewzs: ${res.readyCount ?? pendingCount} ready to pin, ${res.pinnedCount ?? pinnedCount} moved.`
+        );
+        setToastSeverity('success');
+        setToastAction(null);
+        setToastOpen(true);
       }
     } catch (err) {
       console.error('Failed to sync live deals:', err);
+      setToastMessage('Failed to sync deals from WorldNewzs.');
+      setToastSeverity('error');
+      setToastOpen(true);
     } finally {
       setIsSyncing(false);
     }
@@ -400,6 +461,30 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               }}
             >
               {isSyncing ? 'Syncing...' : 'Sync Deals'}
+            </Button>
+          </Tooltip>
+
+          <Tooltip title="Restore only the last removed 48 deals from WorldNewzs into the active Ready to Pin queue (keeps all 3,048 older deals moved)">
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={isRestoring ? <CircularProgress size={15} color="inherit" /> : <SyncIcon />}
+              onClick={() => handleRestoreLatestDeals(48)}
+              disabled={isRestoring || runState.isRunning}
+              sx={{
+                borderColor: '#93C5FD',
+                color: '#1D4ED8',
+                fontWeight: 700,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
+                bgcolor: '#EFF6FF',
+                '&:hover': { bgcolor: '#DBEAFE', borderColor: '#2563EB' },
+              }}
+            >
+              {isRestoring ? 'Restoring...' : '🔄 Restore Latest 48 Deals'}
             </Button>
           </Tooltip>
 
@@ -736,6 +821,24 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               : 'Switch to another filter tab above or sync deals to load products.'}
           </Typography>
           <Box sx={{ display: 'flex', gap: 1.5, mt: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+            {pinFilter === 'pending' && (
+              <Button
+                variant="contained"
+                size="small"
+                onClick={() => handleRestoreLatestDeals(48)}
+                disabled={isRestoring || runState.isRunning}
+                startIcon={isRestoring ? <CircularProgress size={15} color="inherit" /> : <SyncIcon />}
+                sx={{
+                  bgcolor: '#2563eb',
+                  fontWeight: 700,
+                  textTransform: 'none',
+                  borderRadius: 2,
+                  '&:hover': { bgcolor: '#1d4ed8' },
+                }}
+              >
+                {isRestoring ? 'Restoring...' : '🔄 Restore Latest 48 Deals'}
+              </Button>
+            )}
             <Button
               variant="contained"
               size="small"
@@ -1012,6 +1115,24 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
           })}
         </Grid>
       )}
+
+      {/* Toast Notification with Undo Action */}
+      <Snackbar
+        open={toastOpen}
+        autoHideDuration={6000}
+        onClose={() => setToastOpen(false)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+      >
+        <Alert
+          onClose={() => setToastOpen(false)}
+          severity={toastSeverity}
+          variant="filled"
+          action={toastAction}
+          sx={{ width: '100%', alignItems: 'center', fontWeight: 600 }}
+        >
+          {toastMessage}
+        </Alert>
+      </Snackbar>
     </Card>
   );
 };

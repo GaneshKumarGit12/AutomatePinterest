@@ -147,6 +147,12 @@ export const api = {
     return res.data;
   },
 
+  // Restore only the latest 48 deals from worldnewzs.in into Ready to Pin queue (keeping older deals moved)
+  restoreLatestDeals: async (count: number = 48) => {
+    const res = await client.post('/api/deals/restore-latest', { count });
+    return res.data;
+  },
+
   // Sync deals from WorldNewzs live API
   syncDeals: async () => {
     const res = await client.post('/api/deals/sync');
