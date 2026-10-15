@@ -174,6 +174,8 @@ class StartRunRequest(BaseModel):
     collaborators: Optional[List[str]] = ["auto"]
     startCardIndex: Optional[int] = None
     startDealNumber: Optional[int] = None
+    selectedCardIds: Optional[List[str]] = None
+    selectedDeals: Optional[List[Dict[str, Any]]] = None
 
 
 class SocialShareRequest(BaseModel):
@@ -272,9 +274,11 @@ async def run_automation_worker(
     collaborators: List[str],
     start_card_index: int = 0,
     start_deal_number: Optional[int] = None,
+    selected_deals: Optional[List[Dict[str, Any]]] = None,
 ):
-    """Background worker executing the 11-step automation loop across pages with auto-recovery and memory bounding."""
+    """Background worker executing the 11-step automation loop across pages or selected cards with auto-recovery and memory bounding."""
     global _run_state
+    is_selective = bool(selected_deals and len(selected_deals) > 0)
     total_pages = end_page - start_page + 1
     _run_state["isRunning"] = True
     _run_state["runId"] = int(_run_state.get("runId", 0)) + 1
@@ -292,11 +296,17 @@ async def run_automation_worker(
 
     all_cards_for_report = []
 
-    start_deal_msg = f" starting at Deal #{start_deal_number}" if start_deal_number else (f" starting at Card {start_card_index+1}" if start_card_index > 0 else "")
-    broadcast_event("log", {
-        "level": "info",
-        "message": f"🚀 Starting 11-step automation for Page {start_page} to {end_page} ({total_pages} page(s)){start_deal_msg}..."
-    })
+    if is_selective:
+        broadcast_event("log", {
+            "level": "info",
+            "message": f"🎯 Selective Pinning Mode: {len(selected_deals)} selected Deal Card(s) queued across Page {start_page} to {end_page}..."
+        })
+    else:
+        start_deal_msg = f" starting at Deal #{start_deal_number}" if start_deal_number else (f" starting at Card {start_card_index+1}" if start_card_index > 0 else "")
+        broadcast_event("log", {
+            "level": "info",
+            "message": f"🚀 Starting 11-step automation for Page {start_page} to {end_page} ({total_pages} page(s)){start_deal_msg}..."
+        })
 
     collab_mode_str = "Dynamic Auto-Discovery (All Connected Pinterest Collaborators)" if (not collaborators or collaborators == ["auto"] or any(str(c).lower() == "auto" for c in collaborators)) else f"Custom: {', '.join(collaborators)}"
     broadcast_event("log", {
@@ -320,41 +330,140 @@ async def run_automation_worker(
 
         broadcast_event("log", {"level": "success", "message": "✅ Pinterest owner session verified (Dhanvi Collections)!"})
 
-        for page_idx in range(start_page, end_page + 1):
-            if not _run_state["isRunning"]:
-                broadcast_event("log", {"level": "warn", "message": "Automation stopped by user."})
-                break
-
-            _run_state["currentPage"] = page_idx
-            deals = get_deals_for_page(page_idx, 6)
-
-            broadcast_event("log", {
-                "level": "info",
-                "message": f"--- Processing Page {page_idx} of {end_page} (Range: {start_page} to {end_page}): Found {len(deals)} Deal Cards ---"
-            })
-
-            for card_idx, deal in enumerate(deals):
+        if is_selective:
+            # Selective execution for explicitly checked deals
+            for deal_idx, deal in enumerate(selected_deals):
                 if not _run_state["isRunning"]:
+                    broadcast_event("log", {"level": "warn", "message": "Automation stopped by user."})
                     break
 
-                # Skip cards before start_card_index on the initial start_page
-                if page_idx == start_page and card_idx < start_card_index:
-                    deal_overall_idx = (page_idx - 1) * 6 + card_idx + 1
-                    broadcast_event("log", {
-                        "level": "info",
-                        "message": f"⏩ Skipping previously completed Deal #{deal_overall_idx}: {deal.get('truncatedTitle')}"
-                    })
-                    continue
-
+                page_idx = int(deal.get("pageNumber") or 1)
+                card_idx = int(deal.get("cardIndex") or (deal_idx % 6))
+                _run_state["currentPage"] = page_idx
                 _run_state["currentCardIndex"] = card_idx
-                _run_state["currentProductTitle"] = deal["truncatedTitle"]
+                _run_state["currentProductTitle"] = deal.get("truncatedTitle") or (deal.get("title") or "")[:50]
 
                 broadcast_event("step_update", {
                     "card": deal,
                     "page": page_idx,
                     "cardIndex": card_idx,
-                    "message": f"Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']} ({deal['price']})"
+                    "message": f"Selected Deal [{deal_idx+1}/{len(selected_deals)}]: {deal.get('truncatedTitle')} ({deal.get('price')})"
                 })
+
+                share_url = deal.get("shareUrl") or build_pinterest_share_url(deal)
+
+                def on_step_selective(step_entry):
+                    _run_state["stepLogs"].append(step_entry)
+                    if len(_run_state["stepLogs"]) > 50:
+                        _run_state["stepLogs"] = _run_state["stepLogs"][-50:]
+                    broadcast_event("step_log", step_entry)
+
+                context = await get_healthy_context(context)
+
+                result = await execute_11_step_pipeline(
+                    context=context,
+                    deal=deal,
+                    share_url=share_url,
+                    collaborators=collaborators,
+                    on_step_callback=on_step_selective,
+                )
+
+                if not result.get("success"):
+                    err_low = str(result.get("error", "")).lower()
+                    if "closed" in err_low or "target page" in err_low:
+                        broadcast_event("log", {
+                            "level": "warn",
+                            "message": f"⚠️ Browser disconnected during Deal [{deal_idx+1}/{len(selected_deals)}]. Reconnecting browser session..."
+                        })
+                        try:
+                            await close_browser_context()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+                        context = await get_browser_context()
+                    else:
+                        broadcast_event("log", {
+                            "level": "warn",
+                            "message": f"🔄 Retrying Selected Deal [{deal_idx+1}/{len(selected_deals)}]: {deal.get('truncatedTitle')}..."
+                        })
+                        await asyncio.sleep(1.5)
+                        context = await get_healthy_context(context)
+
+                    result = await execute_11_step_pipeline(
+                        context=context,
+                        deal=deal,
+                        share_url=share_url,
+                        collaborators=collaborators,
+                        on_step_callback=on_step_selective,
+                    )
+
+                card_record = {
+                    "id": deal.get("id"),
+                    "asin": deal.get("asin"),
+                    "title": deal.get("title"),
+                    "truncatedTitle": deal.get("truncatedTitle") or (deal.get("title") or "")[:50],
+                    "price": deal.get("price"),
+                    "dealUrl": deal.get("dealUrl") or deal.get("productUrl"),
+                    "imageUrl": deal.get("imageUrl"),
+                    "shareUrl": share_url,
+                    "pageNumber": page_idx,
+                    "cardIndex": card_idx,
+                    "status": "success" if result.get("success") else "failed",
+                    "collaborators": result.get("collaborators") or collaborators,
+                    "error": result.get("error"),
+                }
+                _run_state["processedCards"].append(card_record)
+                all_cards_for_report.append(card_record)
+                _run_state["totalCardsProcessed"] += 1
+
+                if result["success"]:
+                    broadcast_event("log", {
+                        "level": "success",
+                        "message": f"✅ Selected Deal [{deal_idx+1}/{len(selected_deals)}] COMPLETED: {deal.get('truncatedTitle')}"
+                    })
+                else:
+                    broadcast_event("log", {
+                        "level": "error",
+                        "message": f"❌ Selected Deal [{deal_idx+1}/{len(selected_deals)}] FAILED: {result.get('error', 'Unknown error')}"
+                    })
+
+                await asyncio.sleep(1)
+        else:
+            for page_idx in range(start_page, end_page + 1):
+                if not _run_state["isRunning"]:
+                    broadcast_event("log", {"level": "warn", "message": "Automation stopped by user."})
+                    break
+
+                _run_state["currentPage"] = page_idx
+                deals = get_deals_for_page(page_idx, 6)
+
+                broadcast_event("log", {
+                    "level": "info",
+                    "message": f"--- Processing Page {page_idx} of {end_page} (Range: {start_page} to {end_page}): Found {len(deals)} Deal Cards ---"
+                })
+
+                for card_idx, deal in enumerate(deals):
+                    if not _run_state["isRunning"]:
+                        break
+
+                    # Skip cards before start_card_index on the initial start_page
+                    if page_idx == start_page and card_idx < start_card_index:
+                        deal_overall_idx = (page_idx - 1) * 6 + card_idx + 1
+                        broadcast_event("log", {
+                            "level": "info",
+                            "message": f"⏩ Skipping previously completed Deal #{deal_overall_idx}: {deal.get('truncatedTitle')}"
+                        })
+                        continue
+
+                    _run_state["currentCardIndex"] = card_idx
+                    _run_state["currentProductTitle"] = deal["truncatedTitle"]
+
+                    broadcast_event("step_update", {
+                        "card": deal,
+                        "page": page_idx,
+                        "cardIndex": card_idx,
+                        "message": f"Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']} ({deal['price']})"
+                    })
 
                 share_url = build_pinterest_share_url(deal)
 
@@ -440,26 +549,29 @@ async def run_automation_worker(
 
         # Generate dated PDF activity report
         duration_sec = int(time.time() - (_run_state["startTime"] or time.time()))
+        pages_processed = len(set(c.get("pageNumber", 1) for c in all_cards_for_report)) if is_selective else total_pages
+        rep_start = min((c.get("pageNumber", 1) for c in all_cards_for_report), default=start_page) if is_selective else start_page
+        rep_end = max((c.get("pageNumber", 1) for c in all_cards_for_report), default=end_page) if is_selective else end_page
         summary = {
             "total_cards": len(all_cards_for_report),
             "success_count": sum(1 for c in all_cards_for_report if c.get("status") == "success"),
             "failed_count": sum(1 for c in all_cards_for_report if c.get("status") == "failed"),
-            "pages_count": total_pages,
-            "start_page": start_page,
-            "end_page": end_page,
+            "pages_count": pages_processed,
+            "start_page": rep_start,
+            "end_page": rep_end,
             "duration_seconds": duration_sec,
         }
 
         report_info = generate_daily_activity_pdf(summary, all_cards_for_report, REPORT_DIR)
         _run_state["lastReportPath"] = report_info["fullPath"]
 
-        completion_msg = f"Automate process between page {start_page} to {end_page} completed"
+        completion_msg = f"Automate process for {len(all_cards_for_report)} selected card(s) completed" if is_selective else f"Automate process between page {start_page} to {end_page} completed"
         completion_payload = {
             "runId": _run_state["runId"],
             "summary": summary,
             "report": report_info,
-            "startPage": start_page,
-            "endPage": end_page,
+            "startPage": rep_start,
+            "endPage": rep_end,
             "message": completion_msg,
         }
         _run_state["lastCompletionData"] = completion_payload
@@ -581,14 +693,16 @@ def run_cloud_automation_pipeline(
     collaborators: List[str],
     start_card_index: int = 0,
     start_deal_number: Optional[int] = None,
+    selected_deals: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Cloud-native 11-step automation pipeline for Vercel deployments when the local desktop CDP engine is not active.
-    Processes all deal cards in the requested page range, prepares Pinterest Pin Builder URLs, updates runState,
-    and generates the downloadable ReportLab PDF activity report.
+    Processes all deal cards in the requested page range or selected deals, prepares Pinterest Pin Builder URLs,
+    updates runState, and generates the downloadable ReportLab PDF activity report.
     """
     global _run_state
-    total_pages = end_page - start_page + 1
+    is_selective = bool(selected_deals and len(selected_deals) > 0)
+    total_pages = max(1, end_page - start_page + 1)
     run_id = int(_run_state.get("runId", 0)) + 1
     start_ts = time.time()
 
@@ -604,17 +718,16 @@ def run_cloud_automation_pipeline(
             "timestamp": time.strftime("%H:%M:%S", time.localtime()),
         })
 
-    add_log("info", f"🚀 Starting 11-step automation for Page {start_page} to {end_page} ({total_pages} page(s))...")
+    if is_selective:
+        add_log("info", f"🎯 Selective Pinning Mode: {len(selected_deals)} selected Deal Card(s) queued across Page {start_page} to {end_page}...")
+    else:
+        add_log("info", f"🚀 Starting 11-step automation for Page {start_page} to {end_page} ({total_pages} page(s))...")
     add_log("success", "✅ Pinterest account configuration verified (Dhanvi Collections)!")
 
-    for page_idx in range(start_page, end_page + 1):
-        deals = get_deals_for_page(page_idx, 6)
-        add_log("info", f"--- Processing Page {page_idx} of {end_page}: Found {len(deals)} Deal Cards ---")
-
-        for card_idx, deal in enumerate(deals):
-            if page_idx == start_page and card_idx < start_card_index:
-                continue
-
+    if is_selective:
+        for deal_idx, deal in enumerate(selected_deals):
+            page_idx = int(deal.get("pageNumber") or 1)
+            card_idx = int(deal.get("cardIndex") or (deal_idx % 6))
             trunc_title = deal.get("truncatedTitle") or (deal.get("title") or "Amazon Deal")[:50]
             price_str = deal.get("price") or "₹499"
             share_url = deal.get("shareUrl") or build_pinterest_share_url(deal)
@@ -664,27 +777,89 @@ def run_cloud_automation_pipeline(
                 "error": None,
             }
             processed_cards.append(card_record)
-            add_log("success", f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED: {trunc_title} ({price_str})")
+            add_log("success", f"✅ Selected Deal [{deal_idx+1}/{len(selected_deals)}] COMPLETED: {trunc_title} ({price_str})")
+    else:
+        for page_idx in range(start_page, end_page + 1):
+            deals = get_deals_for_page(page_idx, 6)
+            add_log("info", f"--- Processing Page {page_idx} of {end_page}: Found {len(deals)} Deal Cards ---")
+
+            for card_idx, deal in enumerate(deals):
+                if page_idx == start_page and card_idx < start_card_index:
+                    continue
+
+                trunc_title = deal.get("truncatedTitle") or (deal.get("title") or "Amazon Deal")[:50]
+                price_str = deal.get("price") or "₹499"
+                share_url = deal.get("shareUrl") or build_pinterest_share_url(deal)
+                share_urls.append(share_url)
+
+                card_steps = [
+                    (1, f"Inspect Deal Card #{card_idx+1}: {trunc_title} ({price_str})"),
+                    (2, f"Truncate Title to <=50 chars: '{trunc_title}' ({len(trunc_title)}/50 chars)"),
+                    (3, f"Target Board resolved: '{trunc_title}'"),
+                    (4, f"Collaborator synchronization configured for board '{trunc_title}'"),
+                    (5, f"Constructed Pinterest Pin Builder payload for ASIN {deal.get('asin', 'N/A')}"),
+                    (6, f"Validated high-res product image media: {deal.get('imageUrl', '')[:48]}..."),
+                    (7, f"Populated Pin Title: '{trunc_title}'"),
+                    (8, f"Populated Pin Description with Price ({price_str}) & Discount ({deal.get('discount', '')})"),
+                    (9, f"Attached Amazon Affiliate Destination Link: {deal.get('dealUrl', '')[:48]}..."),
+                    (10, f"Assigned Pin to Target Board: '{trunc_title}'"),
+                    (11, f"Prepared & queued Pinterest Pin publication for '{trunc_title}'"),
+                ]
+                last_card_step_logs = []
+                for s_num, s_msg in card_steps:
+                    entry = {
+                        "id": f"step-p{page_idx}-c{card_idx}-s{s_num}",
+                        "stepNumber": s_num,
+                        "cardIndex": card_idx,
+                        "productTitle": trunc_title,
+                        "action": f"Step {s_num}",
+                        "status": "completed",
+                        "message": s_msg,
+                        "timestamp": time.strftime("%H:%M:%S", time.localtime()),
+                    }
+                    last_card_step_logs.append(entry)
+                step_logs = last_card_step_logs
+
+                card_record = {
+                    "id": deal.get("id"),
+                    "asin": deal.get("asin"),
+                    "title": deal.get("title"),
+                    "truncatedTitle": trunc_title,
+                    "price": price_str,
+                    "dealUrl": deal.get("dealUrl") or deal.get("productUrl"),
+                    "imageUrl": deal.get("imageUrl"),
+                    "shareUrl": share_url,
+                    "pageNumber": page_idx,
+                    "cardIndex": card_idx,
+                    "status": "success",
+                    "collaborators": collaborators or DEFAULT_COLLABORATORS,
+                    "error": None,
+                }
+                processed_cards.append(card_record)
+                add_log("success", f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED: {trunc_title} ({price_str})")
 
     duration_sec = max(1, int(time.time() - start_ts))
+    pages_processed = len(set(c.get("pageNumber", 1) for c in processed_cards)) if is_selective else total_pages
+    rep_start = min((c.get("pageNumber", 1) for c in processed_cards), default=start_page) if is_selective else start_page
+    rep_end = max((c.get("pageNumber", 1) for c in processed_cards), default=end_page) if is_selective else end_page
     summary = {
         "total_cards": len(processed_cards),
         "success_count": len(processed_cards),
         "failed_count": 0,
-        "pages_count": total_pages,
-        "start_page": start_page,
-        "end_page": end_page,
+        "pages_count": pages_processed,
+        "start_page": rep_start,
+        "end_page": rep_end,
         "duration_seconds": duration_sec,
     }
 
     report_info = generate_daily_activity_pdf(summary, processed_cards, REPORT_DIR)
-    completion_msg = f"Automate process between page {start_page} to {end_page} completed"
+    completion_msg = f"Automate process for {len(processed_cards)} selected card(s) completed" if is_selective else f"Automate process between page {start_page} to {end_page} completed"
     completion_payload = {
         "runId": run_id,
         "summary": summary,
         "report": report_info,
-        "startPage": start_page,
-        "endPage": end_page,
+        "startPage": rep_start,
+        "endPage": rep_end,
         "message": completion_msg,
     }
 
@@ -694,9 +869,9 @@ def run_cloud_automation_pipeline(
         "isRunning": False,
         "runId": run_id,
         "selectedPages": total_pages,
-        "startPage": start_page,
-        "endPage": end_page,
-        "currentPage": end_page,
+        "startPage": rep_start,
+        "endPage": rep_end,
+        "currentPage": rep_end,
         "currentCardIndex": max(0, len(processed_cards) - 1),
         "totalCardsProcessed": len(processed_cards),
         "currentProductTitle": processed_cards[-1]["truncatedTitle"] if processed_cards else "",
@@ -711,8 +886,8 @@ def run_cloud_automation_pipeline(
         "success": True,
         "completedInline": True,
         "message": completion_msg,
-        "startPage": start_page,
-        "endPage": end_page,
+        "startPage": rep_start,
+        "endPage": rep_end,
         "totalPages": total_pages,
         "startCardIndex": start_card_index,
         "startDealNumber": start_deal_number,
@@ -726,9 +901,55 @@ def run_cloud_automation_pipeline(
 
 @app.post("/api/automation/start")
 async def start_automation(req: StartRunRequest, background_tasks: BackgroundTasks):
-    """Starts the 11-step automation process across user-selected page range."""
+    """Starts the 11-step automation process across user-selected page range or selected deal cards."""
     if _run_state["isRunning"]:
         raise HTTPException(status_code=400, detail="Automation is already running.")
+
+    selected_deals = req.selectedDeals
+    selected_card_ids = req.selectedCardIds
+    if selected_card_ids and not selected_deals:
+        all_dataset = load_products_dataset()
+        id_set = set(str(cid) for cid in selected_card_ids)
+        selected_deals = [d for d in all_dataset if str(d.get("id")) in id_set or str(d.get("asin")) in id_set]
+
+    if selected_deals and len(selected_deals) > 0:
+        pages_in_selection = [int(d.get("pageNumber", 1)) for d in selected_deals if d.get("pageNumber")]
+        start_page = min(pages_in_selection) if pages_in_selection else 1
+        end_page = max(pages_in_selection) if pages_in_selection else 1
+        total_pages = max(1, end_page - start_page + 1)
+        start_card_index = 0
+        start_deal_number = None
+
+        if bool(os.environ.get("VERCEL")) or (async_playwright is None):
+            return run_cloud_automation_pipeline(
+                start_page=start_page,
+                end_page=end_page,
+                collaborators=req.collaborators or DEFAULT_COLLABORATORS,
+                start_card_index=0,
+                start_deal_number=None,
+                selected_deals=selected_deals,
+            )
+
+        background_tasks.add_task(
+            run_automation_worker,
+            start_page,
+            end_page,
+            req.collaborators or DEFAULT_COLLABORATORS,
+            0,
+            None,
+            selected_deals,
+        )
+        return {
+            "success": True,
+            "completedInline": False,
+            "message": f"Automation started for {len(selected_deals)} selected deal card(s) across Page {start_page} to {end_page}.",
+            "startPage": start_page,
+            "endPage": end_page,
+            "totalPages": total_pages,
+            "selectedCount": len(selected_deals),
+            "startCardIndex": 0,
+            "startDealNumber": None,
+        }
 
     start_card_index = 0
     start_deal_number = req.startDealNumber
@@ -854,6 +1075,13 @@ async def sync_edge():
         return {"success": False, "message": "Edge cookies locked. You can also click 'Open Browser Window' to log in."}
     except Exception as e:
         return {"success": False, "message": f"Sync note: {str(e)}"}
+
+
+@app.get("/api/proxy/status")
+async def get_proxy_status_endpoint():
+    """Returns residential proxy status, configured server, and public egress IP."""
+    from backend.engine.session_manager import get_active_ip_info
+    return await get_active_ip_info()
 
 
 @app.get("/api/reports")

@@ -2,7 +2,7 @@ import os
 import shutil
 import subprocess
 import asyncio
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List
 
 try:
     from playwright.async_api import async_playwright, BrowserContext, Page
@@ -44,8 +44,130 @@ def clean_stale_lockfiles(data_dir: str):
                 pass
 
 
+def get_proxy_config() -> Optional[Dict[str, str]]:
+    """
+    Parses residential or custom proxy settings from environment variables.
+    Supports PROXY_SERVER, RESIDENTIAL_PROXY_URL, or PROXY_USERNAME + PROXY_PASSWORD.
+    Accepts standard formats: http://host:port, http://user:pass@host:port, or socks5://...
+    """
+    raw = os.environ.get("PROXY_SERVER") or os.environ.get("RESIDENTIAL_PROXY_URL") or os.environ.get("PROXY_URL")
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    user = os.environ.get("PROXY_USERNAME", "")
+    pwd = os.environ.get("PROXY_PASSWORD", "")
+
+    # Check if user:pass is embedded in the URL
+    if "@" in raw:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(raw)
+            server = f"{p.scheme}://{p.hostname}:{p.port}"
+            username = p.username or user
+            password = p.password or pwd
+            cfg = {"server": server}
+            if username:
+                cfg["username"] = username
+            if password:
+                cfg["password"] = password
+            return cfg
+        except Exception:
+            return {"server": raw}
+
+    cfg = {"server": raw}
+    if user:
+        cfg["username"] = user
+    if pwd:
+        cfg["password"] = pwd
+    return cfg
+
+
+STEALTH_EVASION_SCRIPT = """
+(() => {
+    // 1. Mask navigator.webdriver
+    try {
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+        });
+    } catch (_) {}
+
+    // 2. Mock chrome.runtime
+    try {
+        if (!window.chrome) {
+            window.chrome = {};
+        }
+        if (!window.chrome.runtime) {
+            window.chrome.runtime = {
+                id: 'aapbdbdomjkkjkaonfhkkikfgjllcleb',
+                connect: () => {},
+                sendMessage: () => {},
+            };
+        }
+    } catch (_) {}
+
+    // 3. Emulate standard languages
+    try {
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en'],
+            configurable: true,
+        });
+    } catch (_) {}
+
+    // 4. Emulate realistic plugins count
+    try {
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+            configurable: true,
+        });
+    } catch (_) {}
+
+    // 5. Mask permissions query
+    try {
+        const origQuery = navigator.permissions && navigator.permissions.query;
+        if (origQuery) {
+            navigator.permissions.query = (parameters) =>
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : origQuery(parameters);
+        }
+    } catch (_) {}
+})();
+"""
+
+
+async def get_active_ip_info() -> Dict[str, Any]:
+    """Checks public egress IP address and residential proxy status."""
+    proxy_cfg = get_proxy_config()
+    info = {
+        "hasProxy": bool(proxy_cfg),
+        "enabled": bool(proxy_cfg),
+        "proxyServer": proxy_cfg.get("server") if proxy_cfg else None,
+        "server": proxy_cfg.get("server") if proxy_cfg else None,
+        "isResidential": bool(os.environ.get("RESIDENTIAL_PROXY_URL") or os.environ.get("PROXY_SERVER")),
+    }
+    try:
+        import urllib.request
+        import json
+        req = urllib.request.Request(
+            "https://api.ipify.org?format=json",
+            headers={"User-Agent": "AutomatePinterest/2.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            ip_val = data.get("ip")
+            info["currentIp"] = ip_val
+            info["egressIp"] = ip_val
+    except Exception as e:
+        info["currentIp"] = "Direct"
+        info["egressIp"] = "Direct"
+        info["note"] = str(e)
+    return info
+
+
 async def get_browser_context() -> BrowserContext:
-    """Launches or returns the headful persistent browser context with multi-tier fallback."""
+    """Launches or returns the headful persistent browser context with multi-tier fallback, proxy, and stealth."""
     global _playwright_instance, _persistent_context
 
     if _persistent_context:
@@ -61,6 +183,10 @@ async def get_browser_context() -> BrowserContext:
     if not _playwright_instance:
         _playwright_instance = await async_playwright().start()
 
+    proxy_cfg = get_proxy_config()
+    if proxy_cfg:
+        print(f"[Session Manager] 🛡️ Routing browser traffic through Proxy: {proxy_cfg.get('server')}")
+
     launch_args = [
         "--start-maximized",
         "--disable-blink-features=AutomationControlled",
@@ -71,17 +197,25 @@ async def get_browser_context() -> BrowserContext:
 
     # Attempt 1: Native Edge persistent profile
     try:
-        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
-            channel="msedge",
-            headless=False,
-            viewport=None,
-            slow_mo=80,
-            ignore_default_args=["--enable-automation"],
-            args=launch_args,
-        )
+        launch_kwargs = {
+            "user_data_dir": USER_DATA_DIR,
+            "channel": "msedge",
+            "headless": False,
+            "viewport": None,
+            "slow_mo": 80,
+            "ignore_default_args": ["--enable-automation"],
+            "args": launch_args,
+        }
+        if proxy_cfg:
+            launch_kwargs["proxy"] = proxy_cfg
+
+        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
         _persistent_context.set_default_timeout(15000)
         _persistent_context.set_default_navigation_timeout(60000)
+        try:
+            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+        except Exception:
+            pass
         return _persistent_context
     except Exception as e1:
         print(f"[Session] Attempt 1 failed (Edge persistent): {e1}")
@@ -90,30 +224,49 @@ async def get_browser_context() -> BrowserContext:
     try:
         fresh_dir = os.path.join(USER_DATA_DIR, "fresh_profile")
         clean_stale_lockfiles(fresh_dir)
-        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(
-            user_data_dir=fresh_dir,
-            headless=False,
-            viewport=None,
-            slow_mo=80,
-            ignore_default_args=["--enable-automation"],
-            args=launch_args,
-        )
+        launch_kwargs2 = {
+            "user_data_dir": fresh_dir,
+            "headless": False,
+            "viewport": None,
+            "slow_mo": 80,
+            "ignore_default_args": ["--enable-automation"],
+            "args": launch_args,
+        }
+        if proxy_cfg:
+            launch_kwargs2["proxy"] = proxy_cfg
+
+        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs2)
         _persistent_context.set_default_timeout(15000)
         _persistent_context.set_default_navigation_timeout(60000)
+        try:
+            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+        except Exception:
+            pass
         return _persistent_context
     except Exception as e2:
         print(f"[Session] Attempt 2 failed (Chromium persistent): {e2}")
 
     # Attempt 3: Standard headful browser launch (guaranteed success)
     try:
-        browser = await _playwright_instance.chromium.launch(
-            headless=False,
-            slow_mo=80,
-            args=launch_args,
-        )
-        _persistent_context = await browser.new_context(viewport=None)
+        launch_kwargs3 = {
+            "headless": False,
+            "slow_mo": 80,
+            "args": launch_args,
+        }
+        if proxy_cfg:
+            launch_kwargs3["proxy"] = proxy_cfg
+
+        browser = await _playwright_instance.chromium.launch(**launch_kwargs3)
+        context_kwargs = {"viewport": None}
+        if proxy_cfg:
+            context_kwargs["proxy"] = proxy_cfg
+        _persistent_context = await browser.new_context(**context_kwargs)
         _persistent_context.set_default_timeout(15000)
         _persistent_context.set_default_navigation_timeout(60000)
+        try:
+            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+        except Exception:
+            pass
         return _persistent_context
     except Exception as e3:
         print(f"[Session] Attempt 3 failed (Standard browser): {e3}")

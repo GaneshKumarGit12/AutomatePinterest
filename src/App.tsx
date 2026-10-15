@@ -33,7 +33,7 @@ import StopIcon from '@mui/icons-material/Stop';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import DownloadIcon from '@mui/icons-material/Download';
-import { RunState, StepLogEntry, ProductDeal, CompletionData } from './types/index.ts';
+import { RunState, StepLogEntry, ProductDeal, CompletionData, ProxyStatus } from './types/index.ts';
 import { api } from './services/api.ts';
 import { sseClient } from './services/sse.ts';
 
@@ -47,6 +47,7 @@ const ReportManager = lazy(() => import('./components/ReportManager.tsx'));
 export const App: React.FC = () => {
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [selectedPage, setSelectedPage] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(265);
   const [isCompletionModalOpen, setIsCompletionModalOpen] = useState<boolean>(false);
@@ -107,6 +108,10 @@ export const App: React.FC = () => {
           setCompletionData(data.runState.lastCompletionData);
         }
       }
+      try {
+        const pStatus = await api.getProxyStatus();
+        if (pStatus) setProxyStatus(pStatus);
+      } catch (_) {}
       setIsConnected(true);
     } catch {
       setIsConnected(false);
@@ -250,6 +255,23 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleStartForSelectedDeals = async (selectedDeals: ProductDeal[]) => {
+    try {
+      if (!selectedDeals || selectedDeals.length === 0) return;
+      setToast({
+        message: `Starting selective 11-step automation for ${selectedDeals.length} Deal Card(s)...`,
+        severity: 'info',
+      });
+      const res = await api.startRun({
+        selectedDeals,
+        selectedCardIds: selectedDeals.map((d) => d.id || d.asin || `${d.pageNumber}-${d.cardIndex}`),
+      });
+      applyStartRunResponse(res, res.startPage || 1, res.endPage || 1);
+    } catch (err: any) {
+      setToast({ message: `Failed to start selective pinning: ${err.message}`, severity: 'error' });
+    }
+  };
+
   const handleStop = async () => {
     try {
       await api.stopRun();
@@ -316,6 +338,24 @@ export const App: React.FC = () => {
                 sx={{ fontWeight: 700 }}
               />
 
+              {proxyStatus && (
+                <Tooltip
+                  title={
+                    proxyStatus.enabled
+                      ? `Residential Proxy Connected: ${proxyStatus.server} • Egress IP: ${proxyStatus.egressIp || 'Verified'}`
+                      : 'Direct connection. Residential proxy can be plugged into .env (PROXY_SERVER=http://user:pass@host:port)'
+                  }
+                >
+                  <Chip
+                    label={proxyStatus.enabled ? `Proxy: ${proxyStatus.server?.split('@').pop() || 'Active'}` : 'Residential Ready'}
+                    color={proxyStatus.enabled ? 'primary' : 'default'}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontWeight: 700, fontSize: '0.75rem' }}
+                  />
+                </Tooltip>
+              )}
+
               <Button
                 variant="outlined"
                 size="small"
@@ -367,6 +407,7 @@ export const App: React.FC = () => {
               runState={runState}
               onStartForPage={handleStartForPage}
               onStartForRange={handleStartForRange}
+              onStartForSelectedDeals={handleStartForSelectedDeals}
               onSync={async () => {
                 const res = await api.getDeals(selectedPage, 6);
                 if (res && res.deals) setCurrentDeals(res.deals);

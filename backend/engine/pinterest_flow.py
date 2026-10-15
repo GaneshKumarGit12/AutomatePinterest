@@ -53,6 +53,40 @@ async def handle_login_if_needed(page: Page) -> bool:
         return True
 
 
+async def check_for_pinterest_rate_limit(page: Page, card_id: str = "") -> Optional[str]:
+    """
+    Checks if Pinterest is displaying rate limit notices, Cloudflare challenges, or action blocks.
+    Captures proof screenshot and triggers exponential pause if blocked.
+    """
+    try:
+        reason = await page.evaluate("""() => {
+            const body = (document.body.innerText || '').toLowerCase();
+            if (body.includes("you're doing that too fast") || body.includes("rate limit") || body.includes("action blocked") || body.includes("temporarily blocked")) {
+                return "Pinterest Rate Limit: 'You're doing that too fast / Action blocked'";
+            }
+            if (body.includes("verify you are human") || body.includes("challenge-running") || document.querySelector('#challenge-stage')) {
+                return "Cloudflare / Bot Challenge verification screen detected";
+            }
+            const toast = document.querySelector('[data-test-id="toast-error"], [role="alert"]');
+            if (toast && (toast.textContent || '').toLowerCase().includes('block')) {
+                return "Pinterest Action Block Toast: " + toast.textContent.trim();
+            }
+            return null;
+        }""")
+        if reason:
+            print(f"[Pinterest Flow] ⚠️ {reason} for Card {card_id}! Applying 45-second anti-spam backoff...")
+            try:
+                screenshots_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "state", "screenshots"))
+                os.makedirs(screenshots_dir, exist_ok=True)
+                await page.screenshot(path=os.path.join(screenshots_dir, f"rate_limit_alert_{card_id}.png"))
+            except Exception:
+                pass
+            await asyncio.sleep(45)
+            return reason
+    except Exception:
+        pass
+    return None
+
 
 async def execute_11_step_pipeline(
     context: BrowserContext,
@@ -144,6 +178,7 @@ async def execute_11_step_pipeline(
             await install_visual_cursor(pin_tab)
             await asyncio.sleep(1.5)
             await handle_login_if_needed(pin_tab)
+            await check_for_pinterest_rate_limit(pin_tab, card_id)
             try:
                 await pin_tab.wait_for_selector(
                     '[data-test-id="create-board-button"], #pickerSearchField, [data-test-id="board-selection"]',

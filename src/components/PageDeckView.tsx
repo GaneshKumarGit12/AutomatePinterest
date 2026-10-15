@@ -14,6 +14,7 @@ import {
   CircularProgress,
   Skeleton,
   TextField,
+  Checkbox,
 } from '@mui/material';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ShoppingBagIcon from '@mui/icons-material/ShoppingBag';
@@ -31,6 +32,7 @@ interface PageDeckViewProps {
   runState: RunState;
   onStartForPage: (page: number) => void;
   onStartForRange?: (startPage: number, endPage: number, startDealNumber?: number) => void;
+  onStartForSelectedDeals?: (selectedDeals: ProductDeal[]) => void;
   onSync?: () => Promise<void>;
 }
 
@@ -40,6 +42,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   runState,
   onStartForPage,
   onStartForRange,
+  onStartForSelectedDeals,
   onSync,
 }) => {
   const [deals, setDeals] = useState<ProductDeal[]>([]);
@@ -52,6 +55,53 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   const [rangeStart, setRangeStart] = useState<number>(1);
   const [rangeEnd, setRangeEnd] = useState<number>(1);
   const [startDealNumber, setStartDealNumber] = useState<number | ''>('');
+
+  // Checkbox selection state (keyed by deal.id or asin or `${page}-${cardIndex}`)
+  const [selectedDealsMap, setSelectedDealsMap] = useState<Map<string, ProductDeal>>(new Map());
+
+  const getDealKey = (deal: ProductDeal, idx?: number) =>
+    deal.id || deal.asin || `${deal.pageNumber || selectedPage}-${deal.cardIndex ?? idx ?? 0}`;
+
+  const handleToggleCard = (deal: ProductDeal, idx: number) => {
+    const key = getDealKey(deal, idx);
+    setSelectedDealsMap((prev) => {
+      const next = new Map(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.set(key, { ...deal, cardIndex: deal.cardIndex ?? idx, pageNumber: deal.pageNumber || selectedPage });
+      }
+      return next;
+    });
+  };
+
+  const isCurrentPageFullySelected = deals.length > 0 && deals.every((d, i) => selectedDealsMap.has(getDealKey(d, i)));
+
+  const handleToggleSelectCurrentPage = () => {
+    setSelectedDealsMap((prev) => {
+      const next = new Map(prev);
+      if (isCurrentPageFullySelected) {
+        deals.forEach((d, i) => next.delete(getDealKey(d, i)));
+      } else {
+        deals.forEach((d, i) => {
+          next.set(getDealKey(d, i), { ...d, cardIndex: d.cardIndex ?? i, pageNumber: d.pageNumber || selectedPage });
+        });
+      }
+      return next;
+    });
+  };
+
+  const handleClearSelection = () => {
+    setSelectedDealsMap(new Map());
+  };
+
+  const handleRunSelected = () => {
+    const selectedList = Array.from(selectedDealsMap.values());
+    if (selectedList.length === 0 || runState.isRunning) return;
+    if (onStartForSelectedDeals) {
+      onStartForSelectedDeals(selectedList);
+    }
+  };
 
   const numStart = Number(rangeStart);
   const numEnd = Number(rangeEnd);
@@ -394,6 +444,104 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
         </Box>
       </Paper>
 
+      {/* Checkbox Selection Action Banner & Quick Controls */}
+      <Paper
+        elevation={0}
+        sx={{
+          mt: 2,
+          p: 1.5,
+          borderRadius: 2,
+          bgcolor: selectedDealsMap.size > 0 ? '#fff1f2' : '#f8fafc',
+          border: selectedDealsMap.size > 0 ? '1.5px solid #fecdd3' : '1px dashed #cbd5e1',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 1.5,
+          transition: 'all 0.25s ease',
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, flexWrap: 'wrap' }}>
+          <Button
+            size="small"
+            variant={isCurrentPageFullySelected ? 'contained' : 'outlined'}
+            color="primary"
+            onClick={handleToggleSelectCurrentPage}
+            disabled={runState.isRunning || deals.length === 0}
+            sx={{
+              textTransform: 'none',
+              fontWeight: 700,
+              fontSize: '0.8rem',
+              borderRadius: 2,
+              bgcolor: isCurrentPageFullySelected ? '#E60023' : undefined,
+              borderColor: '#E60023',
+              color: isCurrentPageFullySelected ? '#fff' : '#E60023',
+              '&:hover': {
+                bgcolor: isCurrentPageFullySelected ? '#be123c' : '#ffe4e6',
+              },
+            }}
+          >
+            {isCurrentPageFullySelected
+              ? `✓ Page ${selectedPage} Selected (6 Deals)`
+              : `⚡ Select Page ${selectedPage} (6 Deals)`}
+          </Button>
+
+          {selectedDealsMap.size > 0 && (
+            <Button
+              size="small"
+              variant="text"
+              onClick={handleClearSelection}
+              disabled={runState.isRunning}
+              sx={{
+                textTransform: 'none',
+                fontWeight: 600,
+                fontSize: '0.8rem',
+                color: '#64748b',
+                '&:hover': { color: '#0f172a', bgcolor: '#f1f5f9' },
+              }}
+            >
+              Clear Selection ({selectedDealsMap.size})
+            </Button>
+          )}
+
+          <Chip
+            label={
+              selectedDealsMap.size > 0
+                ? `🎯 ${selectedDealsMap.size} Deal Card(s) Selected for Selective Pinning`
+                : '💡 Check individual cards or click "Select Page" to pin only specific deals'
+            }
+            size="small"
+            color={selectedDealsMap.size > 0 ? 'error' : 'default'}
+            variant={selectedDealsMap.size > 0 ? 'filled' : 'outlined'}
+            sx={{ fontWeight: 700, fontSize: '0.75rem' }}
+          />
+        </Box>
+
+        {selectedDealsMap.size > 0 && (
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={<AutoAwesomeIcon />}
+            disabled={runState.isRunning}
+            onClick={handleRunSelected}
+            sx={{
+              bgcolor: '#E60023',
+              fontWeight: 800,
+              textTransform: 'none',
+              borderRadius: 2,
+              px: 2.5,
+              py: 0.75,
+              boxShadow: '0 4px 14px rgba(230, 0, 35, 0.35)',
+              '&:hover': { bgcolor: '#be123c' },
+            }}
+          >
+            {runState.isRunning
+              ? 'Automation Running...'
+              : `🚀 Pin ${selectedDealsMap.size} Selected Deal${selectedDealsMap.size > 1 ? 's' : ''}`}
+          </Button>
+        )}
+      </Paper>
+
       {/* 6 Products Grid with Lazy Loading */}
       {isLoading ? (
         <Grid container spacing={2.5} sx={{ mt: 1 }}>
@@ -410,19 +558,23 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               runState.isRunning &&
               runState.currentPage === selectedPage &&
               runState.currentCardIndex === idx;
+            const isChecked = selectedDealsMap.has(getDealKey(deal, idx));
 
             return (
               <Grid item xs={12} sm={6} md={4} key={deal.id || idx}>
                 <Card
-                  elevation={isActive ? 6 : 1}
+                  elevation={isActive ? 6 : (isChecked ? 3 : 1)}
                   sx={{
                     borderRadius: 2.5,
-                    border: isActive ? '2px solid #E60023' : '1px solid #e2e8f0',
-                    bgcolor: '#ffffff',
-                    transition: 'all 0.3s ease',
+                    border: isActive
+                      ? '2px solid #E60023'
+                      : (isChecked ? '2px solid #E60023' : '1px solid #e2e8f0'),
+                    bgcolor: isChecked ? '#fffdfd' : '#ffffff',
+                    transition: 'all 0.25s ease',
                     position: 'relative',
                     overflow: 'hidden',
-                    transform: isActive ? 'scale(1.02)' : 'none',
+                    transform: isActive ? 'scale(1.02)' : (isChecked ? 'translateY(-2px)' : 'none'),
+                    boxShadow: isChecked ? '0 4px 12px rgba(230, 0, 35, 0.15)' : undefined,
                   }}
                 >
                   {/* Top Badge & Tag */}
@@ -432,11 +584,25 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      bgcolor: '#f8fafc',
+                      bgcolor: isChecked ? '#fff5f5' : '#f8fafc',
                       borderBottom: '1px solid #f1f5f9',
                     }}
                   >
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                      <Checkbox
+                        size="small"
+                        checked={isChecked}
+                        onChange={() => handleToggleCard(deal, idx)}
+                        disabled={runState.isRunning}
+                        sx={{
+                          p: 0,
+                          color: '#cbd5e1',
+                          '&.Mui-checked': {
+                            color: '#E60023',
+                          },
+                        }}
+                        inputProps={{ 'aria-label': `Select deal ${deal.truncatedTitle}` }}
+                      />
                       <Chip
                         label={`Page ${deal.pageNumber || selectedPage} • Product #${idx + 1} of 6`}
                         size="small"

@@ -130,17 +130,32 @@ export const api = {
     return res.data;
   },
 
-  // Start 11-step automation run across page range
+  // Start 11-step automation run across page range or selected cards
   startRun: async (config: {
-    startPage: number;
+    startPage?: number;
     endPage?: number;
     pages?: number;
     collaborators?: string[];
     startCardIndex?: number;
     startDealNumber?: number;
+    selectedCardIds?: string[];
+    selectedDeals?: ProductDeal[];
   }) => {
     await ensureApiBase();
     const res = await client.post('/api/automation/start', config);
+    return res.data;
+  },
+
+  // Get residential proxy and egress IP status
+  getProxyStatus: async (): Promise<{
+    enabled: boolean;
+    server?: string;
+    source?: string;
+    hasAuth: boolean;
+    egressIp?: string;
+  }> => {
+    await ensureApiBase();
+    const res = await client.get('/api/proxy/status');
     return res.data;
   },
 

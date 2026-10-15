@@ -24,8 +24,21 @@ export interface ProductDeal {
 
 export interface RunConfig {
   startPage?: number;
+  endPage?: number;
   pages?: number;
   collaborators?: string[];
+  startCardIndex?: number;
+  startDealNumber?: number;
+  selectedCardIds?: string[];
+  selectedDeals?: ProductDeal[];
+}
+
+export interface ProxyStatus {
+  enabled: boolean;
+  server?: string;
+  source?: string;
+  hasAuth: boolean;
+  egressIp?: string;
 }
 
 export interface StepLogEntry {
