@@ -26,6 +26,8 @@ load_dotenv()
 
 from backend.engine.scraper import (
     get_deals_for_page,
+    get_deals_paginated,
+    clean_pinned_deals,
     get_unposted_facebook_deals,
     build_pinterest_share_url,
     load_products_dataset,
@@ -43,6 +45,7 @@ from backend.engine.session_manager import (
     ensure_pinterest_authenticated,
 )
 from backend.engine.pinterest_flow import execute_11_step_pipeline, DEFAULT_COLLABORATORS
+from backend.engine.pinterest_ledger import PinterestLedger
 from backend.engine.social_manager import (
     DeduplicationLedger,
     ContentShuffler,
@@ -64,7 +67,8 @@ from backend.engine.facebook_report_exporter import (
 
 app = FastAPI(title="AutomatePinterest Python FastAPI Engine", version="2.0.0")
 
-# Social Manager Instances
+# Pinterest & Social Manager Instances
+pinterest_ledger = PinterestLedger()
 social_ledger = DeduplicationLedger()
 social_poster = QuickSocialPoster(social_ledger)
 
@@ -221,18 +225,52 @@ async def get_status():
 
 
 @app.get("/api/deals")
-async def get_deals(page: int = Query(1, ge=1), page_size: int = Query(6, ge=1, le=50)):
-    """Returns 6 product deals for the specified pagination page."""
-    deals = get_deals_for_page(page, page_size)
-    total_products = len(load_products_dataset())
-    total_pages = (total_products + page_size - 1) // page_size if total_products > 0 else 1
+async def get_deals(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(6, ge=1, le=50),
+    filter: str = Query("pending"),
+):
+    """
+    Returns 6 product deals for the specified pagination page and filter ('pending', 'pinned', 'all').
+    'pending' filters out all 508+ already-moved Pinterest products so the active queue begins from fresh deals.
+    """
+    pinterest_ledger.ensure_fresh()
+    res = get_deals_paginated(
+        page_number=page,
+        page_size=page_size,
+        filter_mode=filter,
+        ledger=pinterest_ledger,
+    )
+    return res
 
+
+@app.post("/api/deals/clean-pinned")
+async def clean_pinned_deals_endpoint():
+    """
+    Purges/syncs all products already moved/pinned to Pinterest from the active Pinterest automation queue.
+    """
+    pinterest_ledger.ensure_fresh()
+    res = clean_pinned_deals(ledger=pinterest_ledger)
+    broadcast_event("log", {
+        "level": "success",
+        "message": f"🧹 [Pinterest Clean] {res.get('message')}"
+    })
+    return res
+
+
+@app.post("/api/deals/mark-pinned")
+async def mark_deals_pinned_endpoint(payload: Dict[str, Any]):
+    """
+    Marks one or more ASINs as moved/pinned to Pinterest.
+    """
+    asins = payload.get("asins", [])
+    if isinstance(asins, str):
+        asins = [asins]
+    count = pinterest_ledger.mark_asins_pinned(asins)
     return {
-        "page": page,
-        "pageSize": page_size,
-        "totalPages": total_pages,
-        "totalProducts": total_products,
-        "deals": deals,
+        "success": True,
+        "markedCount": count,
+        "message": f"Marked {count} deal(s) as moved to Pinterest."
     }
 
 
@@ -417,9 +455,16 @@ async def run_automation_worker(
                 _run_state["totalCardsProcessed"] += 1
 
                 if result["success"]:
+                    pinterest_ledger.mark_pinned(deal)
+                    broadcast_event("deal_pinned", {
+                        "asin": deal.get("asin"),
+                        "title": deal.get("title"),
+                        "pageNumber": page_idx,
+                        "cardIndex": card_idx,
+                    })
                     broadcast_event("log", {
                         "level": "success",
-                        "message": f"✅ Selected Deal [{deal_idx+1}/{len(selected_deals)}] COMPLETED: {deal.get('truncatedTitle')}"
+                        "message": f"✅ Selected Deal [{deal_idx+1}/{len(selected_deals)}] COMPLETED & MOVED TO PINTEREST: {deal.get('truncatedTitle')}"
                     })
                 else:
                     broadcast_event("log", {
@@ -535,9 +580,16 @@ async def run_automation_worker(
                 _run_state["totalCardsProcessed"] += 1
 
                 if result["success"]:
+                    pinterest_ledger.mark_pinned(deal)
+                    broadcast_event("deal_pinned", {
+                        "asin": deal.get("asin"),
+                        "title": deal.get("title"),
+                        "pageNumber": page_idx,
+                        "cardIndex": card_idx,
+                    })
                     broadcast_event("log", {
                         "level": "success",
-                        "message": f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED: {deal['truncatedTitle']}"
+                        "message": f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED & MOVED TO PINTEREST: {deal['truncatedTitle']}"
                     })
                 else:
                     broadcast_event("log", {

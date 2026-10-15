@@ -109,18 +109,35 @@ export const api = {
     return res.data;
   },
 
-  // Get paginated deals (6 products per page)
+  // Get paginated deals (6 products per page) with filter support ('pending', 'pinned', 'all')
   getDeals: async (
     page: number = 1,
-    pageSize: number = 6
+    pageSize: number = 6,
+    filter: 'pending' | 'pinned' | 'all' = 'pending'
   ): Promise<{
     page: number;
     pageSize: number;
     totalPages: number;
     totalProducts: number;
+    pendingCount?: number;
+    pinnedCount?: number;
+    totalCatalog?: number;
+    filter?: string;
     deals: ProductDeal[];
   }> => {
-    const res = await client.get(`/api/deals?page=${page}&page_size=${pageSize}`);
+    const res = await client.get(`/api/deals?page=${page}&page_size=${pageSize}&filter=${filter}`);
+    return res.data;
+  },
+
+  // Purge/sync all products moved/pinned to Pinterest from the active queue
+  cleanPinnedDeals: async () => {
+    const res = await client.post('/api/deals/clean-pinned');
+    return res.data;
+  },
+
+  // Mark specific ASINs as moved/pinned to Pinterest
+  markDealsAsPinned: async (asins: string[]) => {
+    const res = await client.post('/api/deals/mark-pinned', { asins });
     return res.data;
   },
 

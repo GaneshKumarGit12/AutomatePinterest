@@ -214,29 +214,142 @@ def format_amazon_product_card(p: Dict[str, Any], idx: int = 0, page_number: int
         "cardIndexOnPage": idx + 1,
         "serialNumber": serial_number,
         "dateAdded": p.get("dateAdded") or "",
-        "status": "pending",
-        "statusLabel": "Ready to Post",
+        "isPinned": bool(p.get("isPinned", False)),
+        "status": "pinned" if p.get("isPinned") else "pending",
+        "statusLabel": "Moved to Pinterest" if p.get("isPinned") else "Ready to Pin",
     }
     deal["shareUrl"] = build_pinterest_share_url(deal)
     return deal
 
 
-def get_deals_for_page(page_number: int = 1, page_size: int = 6) -> List[Dict[str, Any]]:
-    """Returns 6 deals for the selected page index with 50-character truncated titles."""
+def get_deals_paginated(
+    page_number: int = 1,
+    page_size: int = 6,
+    filter_mode: str = "pending",
+    ledger: Any = None,
+) -> Dict[str, Any]:
+    """
+    Returns paginated deals and statistics for the requested filter ('pending', 'pinned', 'all').
+    'pending' filters out all 508+ already-pinned products so active queue starts from fresh products.
+    """
+    if ledger is None:
+        try:
+            from backend.engine.pinterest_ledger import PinterestLedger
+            ledger = PinterestLedger()
+        except Exception:
+            ledger = None
+    elif hasattr(ledger, "ensure_fresh"):
+        ledger.ensure_fresh()
+
     products = load_products_dataset()
     if not products:
-        return []
+        return {
+            "deals": [],
+            "page": page_number,
+            "pageSize": page_size,
+            "totalPages": 1,
+            "totalProducts": 0,
+            "pendingCount": 0,
+            "pinnedCount": 0,
+            "totalCatalog": 0,
+            "filter": filter_mode,
+        }
 
-    start_idx = max(0, (page_number - 1) * page_size)
+    pending_list = []
+    pinned_list = []
+
+    for idx, p in enumerate(products):
+        asin = str(p.get("asin") or "").strip()
+        title = str(p.get("title") or "").strip()
+        is_pin = ledger.is_pinned(asin, title) if ledger else False
+        p_copy = dict(p)
+        p_copy["isPinned"] = is_pin
+        p_copy["catalogIndex"] = idx + 1
+        if is_pin:
+            pinned_list.append(p_copy)
+        else:
+            pending_list.append(p_copy)
+
+    total_catalog = len(products)
+    pending_count = len(pending_list)
+    pinned_count = len(pinned_list)
+
+    if filter_mode == "pinned":
+        active_list = pinned_list
+    elif filter_mode == "all":
+        active_list = pending_list + pinned_list
+    else:  # "pending"
+        active_list = pending_list
+
+    total_filtered = len(active_list)
+    total_pages = max(1, (total_filtered + page_size - 1) // page_size)
+    safe_page = min(max(1, page_number), total_pages)
+
+    start_idx = (safe_page - 1) * page_size
     end_idx = start_idx + page_size
-    slice_items = products[start_idx:end_idx]
+    slice_items = active_list[start_idx:end_idx]
 
     deals = []
     for idx, p in enumerate(slice_items):
         serial_num = start_idx + idx + 1
-        deals.append(format_amazon_product_card(p, idx=idx, page_number=page_number, serial_number=serial_num))
+        card = format_amazon_product_card(p, idx=idx, page_number=safe_page, serial_number=serial_num)
+        card["isPinned"] = p.get("isPinned", False)
+        if card["isPinned"]:
+            card["status"] = "pinned"
+            card["statusLabel"] = "Moved to Pinterest"
+        deals.append(card)
 
-    return deals
+    return {
+        "deals": deals,
+        "page": safe_page,
+        "pageSize": page_size,
+        "totalPages": total_pages,
+        "totalProducts": total_filtered,
+        "pendingCount": pending_count,
+        "pinnedCount": pinned_count,
+        "totalCatalog": total_catalog,
+        "filter": filter_mode,
+    }
+
+
+def get_deals_for_page(
+    page_number: int = 1,
+    page_size: int = 6,
+    filter_mode: str = "pending",
+    ledger: Any = None,
+) -> List[Dict[str, Any]]:
+    """Returns 6 deals for the selected page index with 50-character truncated titles."""
+    res = get_deals_paginated(
+        page_number=page_number,
+        page_size=page_size,
+        filter_mode=filter_mode,
+        ledger=ledger,
+    )
+    return res.get("deals", [])
+
+
+def clean_pinned_deals(ledger: Any = None) -> Dict[str, Any]:
+    """
+    Purges/syncs pinned items from the active queue and returns updated counts.
+    """
+    if ledger is None:
+        try:
+            from backend.engine.pinterest_ledger import PinterestLedger
+            ledger = PinterestLedger()
+        except Exception:
+            ledger = None
+
+    if ledger and hasattr(ledger, "clean_pinned"):
+        ledger.clean_pinned()
+
+    summary = get_deals_paginated(page_number=1, page_size=6, filter_mode="pending", ledger=ledger)
+    return {
+        "success": True,
+        "cleanedCount": summary.get("pinnedCount", 0),
+        "remainingCount": summary.get("pendingCount", 0),
+        "totalCatalog": summary.get("totalCatalog", 0),
+        "message": f"Successfully cleared {summary.get('pinnedCount', 0)} already-moved product(s) from Pinterest queue ({summary.get('pendingCount', 0)} new deals ready).",
+    }
 
 
 def get_unposted_facebook_deals(

@@ -17,14 +17,16 @@ import {
   Checkbox,
 } from '@mui/material';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
-import ShoppingBagIcon from '@mui/icons-material/ShoppingBag';
 import ShareIcon from '@mui/icons-material/Share';
 import ContentCutIcon from '@mui/icons-material/ContentCut';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import SyncIcon from '@mui/icons-material/Sync';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
+import PushPinIcon from '@mui/icons-material/PushPin';
 import { ProductDeal, RunState } from '../types/index.ts';
 import { api } from '../services/api.ts';
+import { sseClient } from '../services/sse.ts';
 
 interface PageDeckViewProps {
   selectedPage: number;
@@ -48,8 +50,13 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   const [deals, setDeals] = useState<ProductDeal[]>([]);
   const [totalPages, setTotalPages] = useState<number>(265);
   const [totalProducts, setTotalProducts] = useState<number>(1588);
+  const [pendingCount, setPendingCount] = useState<number>(0);
+  const [pinnedCount, setPinnedCount] = useState<number>(508);
+  const [totalCatalog, setTotalCatalog] = useState<number>(3048);
+  const [pinFilter, setPinFilter] = useState<'pending' | 'pinned' | 'all'>('pending');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [isCleaning, setIsCleaning] = useState<boolean>(false);
 
   // Page range automation controller states
   const [rangeStart, setRangeStart] = useState<number>(1);
@@ -63,6 +70,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
     deal.id || deal.asin || `${deal.pageNumber || selectedPage}-${deal.cardIndex ?? idx ?? 0}`;
 
   const handleToggleCard = (deal: ProductDeal, idx: number) => {
+    if (deal.isPinned) return; // Prevent selecting already-pinned deals
     const key = getDealKey(deal, idx);
     setSelectedDealsMap((prev) => {
       const next = new Map(prev);
@@ -75,15 +83,17 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
     });
   };
 
-  const isCurrentPageFullySelected = deals.length > 0 && deals.every((d, i) => selectedDealsMap.has(getDealKey(d, i)));
+  const selectableDeals = deals.filter((d) => !d.isPinned);
+  const isCurrentPageFullySelected =
+    selectableDeals.length > 0 && selectableDeals.every((d, i) => selectedDealsMap.has(getDealKey(d, i)));
 
   const handleToggleSelectCurrentPage = () => {
     setSelectedDealsMap((prev) => {
       const next = new Map(prev);
       if (isCurrentPageFullySelected) {
-        deals.forEach((d, i) => next.delete(getDealKey(d, i)));
+        selectableDeals.forEach((d, i) => next.delete(getDealKey(d, i)));
       } else {
-        deals.forEach((d, i) => {
+        selectableDeals.forEach((d, i) => {
           next.set(getDealKey(d, i), { ...d, cardIndex: d.cardIndex ?? i, pageNumber: d.pageNumber || selectedPage });
         });
       }
@@ -133,13 +143,19 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
     }
   };
 
-  const fetchPageDeals = async () => {
+  const fetchPageDeals = async (
+    pageToFetch: number = selectedPage,
+    filterToFetch: 'pending' | 'pinned' | 'all' = pinFilter
+  ) => {
     setIsLoading(true);
     try {
-      const res = await api.getDeals(selectedPage, 6);
+      const res = await api.getDeals(pageToFetch, 6, filterToFetch);
       setDeals(res.deals || []);
-      setTotalPages(res.totalPages || 230);
-      setTotalProducts(res.totalProducts || 1380);
+      setTotalPages(res.totalPages || 1);
+      setTotalProducts(res.totalProducts || 0);
+      if (typeof res.pendingCount === 'number') setPendingCount(res.pendingCount);
+      if (typeof res.pinnedCount === 'number') setPinnedCount(res.pinnedCount);
+      if (typeof res.totalCatalog === 'number') setTotalCatalog(res.totalCatalog);
     } catch (err) {
       console.error('Failed to load page deals:', err);
     } finally {
@@ -148,8 +164,43 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   };
 
   useEffect(() => {
-    fetchPageDeals();
-  }, [selectedPage]);
+    fetchPageDeals(selectedPage, pinFilter);
+  }, [selectedPage, pinFilter]);
+
+  // Real-time synchronization when automation pins deals
+  useEffect(() => {
+    const unsub = sseClient.subscribe('deal_pinned', () => {
+      setPinnedCount((prev) => prev + 1);
+      setPendingCount((prev) => Math.max(0, prev - 1));
+      if (pinFilter === 'pending') {
+        fetchPageDeals(selectedPage, 'pending');
+      }
+    });
+    return () => unsub();
+  }, [selectedPage, pinFilter]);
+
+  const handleFilterChange = (newFilter: 'pending' | 'pinned' | 'all') => {
+    setPinFilter(newFilter);
+    onPageChange(1);
+    fetchPageDeals(1, newFilter);
+  };
+
+  const handleCleanPinnedDeals = async () => {
+    setIsCleaning(true);
+    try {
+      const res = await api.cleanPinnedDeals();
+      if (res && typeof res.cleanedCount === 'number') {
+        setPinnedCount(res.cleanedCount);
+        setPendingCount(res.remainingCount || 0);
+      }
+      onPageChange(1);
+      await fetchPageDeals(1, pinFilter);
+    } catch (err) {
+      console.error('Failed to clean pinned deals:', err);
+    } finally {
+      setIsCleaning(false);
+    }
+  };
 
   const handleSyncDeals = async () => {
     setIsSyncing(true);
@@ -158,7 +209,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
       if (res && res.success) {
         setTotalProducts(res.totalProducts);
         setTotalPages(res.totalPages);
-        await fetchPageDeals();
+        await fetchPageDeals(selectedPage, pinFilter);
         if (onSync) {
           await onSync();
         }
@@ -171,33 +222,81 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
   };
 
   return (
-    <Card elevation={2} sx={{ borderRadius: 3, border: '1px solid #e2e8f0', p: 3 }}>
-      {/* Header Bar with Pagination */}
+    <Card elevation={2} sx={{ borderRadius: 3, border: '1px solid #e2e8f0', p: { xs: 2, sm: 3 } }}>
+      {/* Header Bar with Filter Tabs & Quick Actions */}
       <Box
         sx={{
           display: 'flex',
+          flexDirection: { xs: 'column', md: 'row' },
           justifyContent: 'space-between',
-          alignItems: 'center',
+          alignItems: { xs: 'flex-start', md: 'center' },
           flexWrap: 'wrap',
           gap: 2,
-          pb: 2.5,
+          pb: 2,
           borderBottom: '1px solid #f1f5f9',
         }}
       >
-        <Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <Typography variant="h6" fontWeight={800} color="#0f172a">
-              Amazon Deal Cards (Page {selectedPage})
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+            <Typography variant="h6" fontWeight={800} color="#0f172a" sx={{ lineHeight: 1.2 }}>
+              Amazon Deal Cards
             </Typography>
             <Chip
-              label={`Showing Products 1 to 6 on Page ${selectedPage} • ${totalProducts} total deals (${totalPages} pages)`}
+              label={`Page ${selectedPage} of ${totalPages} • ${totalProducts} deals in view`}
               size="small"
               sx={{ bgcolor: '#f1f5f9', fontWeight: 700, color: '#475569' }}
             />
           </Box>
-          <Typography variant="caption" color="text.secondary">
-            Products 1 to 6 for Page {selectedPage} with 50-character title truncation. Synced live from https://worldnewzs.in/amazon-products.
-          </Typography>
+
+          {/* Pinterest Automation Filter Chips */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+            <Chip
+              icon={<AutoAwesomeIcon sx={{ fontSize: 14 }} />}
+              label={`Ready to Pin (${pendingCount > 0 ? pendingCount : (pinFilter === 'pending' ? totalProducts : totalCatalog - pinnedCount)})`}
+              size="small"
+              onClick={() => handleFilterChange('pending')}
+              color={pinFilter === 'pending' ? 'primary' : 'default'}
+              variant={pinFilter === 'pending' ? 'filled' : 'outlined'}
+              sx={{
+                fontWeight: 700,
+                cursor: 'pointer',
+                bgcolor: pinFilter === 'pending' ? '#E60023' : undefined,
+                color: pinFilter === 'pending' ? '#ffffff' : '#334155',
+                '&:hover': { bgcolor: pinFilter === 'pending' ? '#be123c' : '#f1f5f9' },
+              }}
+            />
+
+            <Chip
+              icon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+              label={`Moved to Pinterest (${pinnedCount})`}
+              size="small"
+              onClick={() => handleFilterChange('pinned')}
+              color={pinFilter === 'pinned' ? 'success' : 'default'}
+              variant={pinFilter === 'pinned' ? 'filled' : 'outlined'}
+              sx={{
+                fontWeight: 700,
+                cursor: 'pointer',
+                bgcolor: pinFilter === 'pinned' ? '#059669' : undefined,
+                color: pinFilter === 'pinned' ? '#ffffff' : '#334155',
+                '&:hover': { bgcolor: pinFilter === 'pinned' ? '#047857' : '#f1f5f9' },
+              }}
+            />
+
+            <Chip
+              label={`All Deals (${totalCatalog || 3048})`}
+              size="small"
+              onClick={() => handleFilterChange('all')}
+              color={pinFilter === 'all' ? 'default' : 'default'}
+              variant={pinFilter === 'all' ? 'filled' : 'outlined'}
+              sx={{
+                fontWeight: 700,
+                cursor: 'pointer',
+                bgcolor: pinFilter === 'all' ? '#334155' : undefined,
+                color: pinFilter === 'all' ? '#ffffff' : '#64748b',
+                '&:hover': { bgcolor: pinFilter === 'all' ? '#1e293b' : '#f1f5f9' },
+              }}
+            />
+          </Box>
         </Box>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
@@ -211,49 +310,79 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
             disabled={runState.isRunning}
           />
 
+          <Tooltip title="Verify and purge all 508+ already-pinned products from the active queue">
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={isCleaning ? <CircularProgress size={15} color="inherit" /> : <DeleteSweepIcon />}
+              onClick={handleCleanPinnedDeals}
+              disabled={isCleaning || runState.isRunning}
+              sx={{
+                borderColor: '#FDBA74',
+                color: '#C2410C',
+                fontWeight: 700,
+                textTransform: 'none',
+                borderRadius: 2,
+                px: 1.5,
+                py: 0.75,
+                fontSize: '0.8rem',
+                bgcolor: '#FFF7ED',
+                '&:hover': { bgcolor: '#FFEDD5', borderColor: '#EA580C' },
+              }}
+            >
+              {isCleaning ? 'Cleaning...' : '🧹 Clean Pinned'}
+            </Button>
+          </Tooltip>
+
           <Tooltip title="Fetch latest live Amazon deals directly from WorldNewzs.in">
             <Button
               variant="outlined"
               color="primary"
-              startIcon={isSyncing ? <CircularProgress size={16} color="inherit" /> : <SyncIcon />}
+              size="small"
+              startIcon={isSyncing ? <CircularProgress size={15} color="inherit" /> : <SyncIcon />}
               disabled={isSyncing || runState.isRunning}
               onClick={handleSyncDeals}
               sx={{
                 fontWeight: 700,
                 textTransform: 'none',
                 borderRadius: 2,
-                px: 2,
+                px: 1.75,
+                py: 0.75,
+                fontSize: '0.8rem',
               }}
             >
-              {isSyncing ? 'Syncing...' : 'Sync WorldNewzs Deals'}
+              {isSyncing ? 'Syncing...' : 'Sync Deals'}
             </Button>
           </Tooltip>
 
           <Button
             variant="contained"
             color="primary"
+            size="small"
             startIcon={<AutoAwesomeIcon />}
-            disabled={runState.isRunning}
+            disabled={runState.isRunning || (pinFilter === 'pinned' && deals.every((d) => d.isPinned))}
             onClick={() => onStartForPage(selectedPage)}
             sx={{
               bgcolor: '#E60023',
               fontWeight: 700,
               textTransform: 'none',
               borderRadius: 2,
-              px: 2.5,
+              px: 2,
+              py: 0.75,
+              fontSize: '0.8rem',
               '&:hover': { bgcolor: '#be123c' },
             }}
           >
-            Run 11-Steps for Page {selectedPage}
+            Run Page {selectedPage}
           </Button>
         </Box>
       </Box>
 
-      {/* Page Range Automation Controller (Pagination Range: e.g. 6 to 8 or 1 to 10) */}
+      {/* Page Range Automation Controller */}
       <Paper
         elevation={0}
         sx={{
-          mt: 2.5,
+          mt: 2,
           p: 2,
           borderRadius: 2.5,
           bgcolor: '#f8fafc',
@@ -275,26 +404,26 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               Presets:
             </Typography>
             <Chip
-              label="Page 5 (Test)"
+              label="Page 1 (Start)"
               size="small"
               onClick={() => {
-                setRangeStart(5);
-                setRangeEnd(5);
-                onPageChange(5);
+                setRangeStart(1);
+                setRangeEnd(1);
+                onPageChange(1);
               }}
-              color={numStart === 5 && numEnd === 5 ? 'primary' : 'default'}
-              variant={numStart === 5 && numEnd === 5 ? 'filled' : 'outlined'}
+              color={numStart === 1 && numEnd === 1 ? 'primary' : 'default'}
+              variant={numStart === 1 && numEnd === 1 ? 'filled' : 'outlined'}
               sx={{ fontWeight: 700, cursor: 'pointer' }}
             />
             <Chip
-              label="Pages 6 - 8"
+              label="Pages 1 - 5"
               size="small"
               onClick={() => {
-                setRangeStart(6);
-                setRangeEnd(8);
+                setRangeStart(1);
+                setRangeEnd(5);
               }}
-              color={numStart === 6 && numEnd === 8 ? 'primary' : 'default'}
-              variant={numStart === 6 && numEnd === 8 ? 'filled' : 'outlined'}
+              color={numStart === 1 && numEnd === 5 ? 'primary' : 'default'}
+              variant={numStart === 1 && numEnd === 5 ? 'filled' : 'outlined'}
               sx={{ fontWeight: 700, cursor: 'pointer' }}
             />
             <Chip
@@ -308,24 +437,6 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               color={numStart === 1 && numEnd === 10 && !startDealNumber ? 'primary' : 'default'}
               variant={numStart === 1 && numEnd === 10 && !startDealNumber ? 'filled' : 'outlined'}
               sx={{ fontWeight: 700, cursor: 'pointer' }}
-            />
-            <Chip
-              label="⚡ Resume from Deal #58 (Page 10 to 20)"
-              size="small"
-              onClick={() => {
-                setRangeStart(10);
-                setRangeEnd(20);
-                setStartDealNumber(58);
-                onPageChange(10);
-              }}
-              color={startDealNumber === 58 ? 'secondary' : 'default'}
-              variant={startDealNumber === 58 ? 'filled' : 'outlined'}
-              sx={{
-                fontWeight: 700,
-                cursor: 'pointer',
-                bgcolor: startDealNumber === 58 ? '#7c3aed' : undefined,
-                color: startDealNumber === 58 ? '#fff' : undefined,
-              }}
             />
             <Chip
               label={`Active (Page ${selectedPage})`}
@@ -410,12 +521,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
               sx={{ fontWeight: 700 }}
             />
           ) : (
-            <Chip
-              label={validationError}
-              color="error"
-              size="small"
-              sx={{ fontWeight: 700 }}
-            />
+            <Chip label={validationError} color="error" size="small" sx={{ fontWeight: 700 }} />
           )}
 
           <Box sx={{ ml: 'auto' }}>
@@ -467,7 +573,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
             variant={isCurrentPageFullySelected ? 'contained' : 'outlined'}
             color="primary"
             onClick={handleToggleSelectCurrentPage}
-            disabled={runState.isRunning || deals.length === 0}
+            disabled={runState.isRunning || selectableDeals.length === 0}
             sx={{
               textTransform: 'none',
               fontWeight: 700,
@@ -482,8 +588,8 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
             }}
           >
             {isCurrentPageFullySelected
-              ? `✓ Page ${selectedPage} Selected (6 Deals)`
-              : `⚡ Select Page ${selectedPage} (6 Deals)`}
+              ? `✓ Page ${selectedPage} Selected (${selectableDeals.length} Deals)`
+              : `⚡ Select Page ${selectedPage} (${selectableDeals.length} Deals)`}
           </Button>
 
           {selectedDealsMap.size > 0 && (
@@ -542,7 +648,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
         )}
       </Paper>
 
-      {/* 6 Products Grid with Lazy Loading */}
+      {/* 6 Products Grid with Equal Height, Zero Gaps, and Mobile Responsive Alignment */}
       {isLoading ? (
         <Grid container spacing={2.5} sx={{ mt: 1 }}>
           {[1, 2, 3, 4, 5, 6].map((n) => (
@@ -565,11 +671,14 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                 <Card
                   elevation={isActive ? 6 : (isChecked ? 3 : 1)}
                   sx={{
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
                     borderRadius: 2.5,
                     border: isActive
                       ? '2px solid #E60023'
                       : (isChecked ? '2px solid #E60023' : '1px solid #e2e8f0'),
-                    bgcolor: isChecked ? '#fffdfd' : '#ffffff',
+                    bgcolor: isChecked ? '#fffdfd' : (deal.isPinned ? '#fcfdfd' : '#ffffff'),
                     transition: 'all 0.25s ease',
                     position: 'relative',
                     overflow: 'hidden',
@@ -577,23 +686,23 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                     boxShadow: isChecked ? '0 4px 12px rgba(230, 0, 35, 0.15)' : undefined,
                   }}
                 >
-                  {/* Top Badge & Tag */}
+                  {/* Top Badge & Tag Header */}
                   <Box
                     sx={{
                       p: 1.2,
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      bgcolor: isChecked ? '#fff5f5' : '#f8fafc',
+                      bgcolor: isChecked ? '#fff5f5' : (deal.isPinned ? '#f0fdf4' : '#f8fafc'),
                       borderBottom: '1px solid #f1f5f9',
                     }}
                   >
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, flexWrap: 'wrap' }}>
                       <Checkbox
                         size="small"
                         checked={isChecked}
                         onChange={() => handleToggleCard(deal, idx)}
-                        disabled={runState.isRunning}
+                        disabled={runState.isRunning || deal.isPinned}
                         sx={{
                           p: 0,
                           color: '#cbd5e1',
@@ -604,7 +713,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                         inputProps={{ 'aria-label': `Select deal ${deal.truncatedTitle}` }}
                       />
                       <Chip
-                        label={`Page ${deal.pageNumber || selectedPage} • Product #${idx + 1} of 6`}
+                        label={`Page ${deal.pageNumber || selectedPage} • #${idx + 1}`}
                         size="small"
                         color={isActive ? 'error' : 'default'}
                         sx={{
@@ -615,11 +724,27 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                           color: isActive ? '#dc2626' : '#1e293b',
                         }}
                       />
-                      <Chip
-                        label={deal.tag || 'DEAL'}
-                        size="small"
-                        sx={{ fontSize: 9, fontWeight: 700, height: 20, bgcolor: '#e2e8f0', color: '#475569' }}
-                      />
+                      {deal.isPinned ? (
+                        <Chip
+                          icon={<CheckCircleIcon sx={{ fontSize: '11px !important', color: '#16a34a' }} />}
+                          label="Moved to Pinterest"
+                          size="small"
+                          sx={{
+                            fontSize: 9.5,
+                            fontWeight: 700,
+                            height: 22,
+                            bgcolor: '#dcfce7',
+                            color: '#15803d',
+                            border: '1px solid #bbf7d0',
+                          }}
+                        />
+                      ) : (
+                        <Chip
+                          label={deal.tag || 'DEAL'}
+                          size="small"
+                          sx={{ fontSize: 9, fontWeight: 700, height: 20, bgcolor: '#e2e8f0', color: '#475569' }}
+                        />
+                      )}
                     </Box>
                     <Chip
                       label={deal.discount || '45% OFF'}
@@ -629,10 +754,11 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                     />
                   </Box>
 
-                  {/* Lazy Loaded Product Image */}
+                  {/* Lazy Loaded Product Image Container */}
                   <Box
                     sx={{
                       height: 150,
+                      minHeight: 150,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
@@ -644,7 +770,7 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                       component="img"
                       src={deal.imageUrl}
                       alt={deal.title}
-                      loading="eager"
+                      loading="lazy"
                       decoding="async"
                       width={140}
                       height={140}
@@ -658,20 +784,31 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                     />
                   </Box>
 
-                  {/* Title, Truncation Indicator & Pricing */}
-                  <CardContent sx={{ p: 2, pt: 1, '&:last-child': { pb: 2 } }}>
+                  {/* Title, Board Name, Price & Actions */}
+                  <CardContent
+                    sx={{
+                      p: 2,
+                      pt: 1.25,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      flexGrow: 1,
+                      '&:last-child': { pb: 2 },
+                    }}
+                  >
                     <Typography
                       variant="body2"
                       fontWeight={700}
                       sx={{
                         color: '#0f172a',
-                        height: 42,
+                        height: 40,
+                        minHeight: 40,
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         display: '-webkit-box',
                         WebkitLineClamp: 2,
                         WebkitBoxOrient: 'vertical',
                         fontSize: '0.84rem',
+                        lineHeight: 1.25,
                         mb: 1,
                       }}
                       title={deal.title}
@@ -683,55 +820,65 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                     <Paper
                       elevation={0}
                       sx={{
-                        p: 1,
-                        mb: 1.5,
+                        p: 0.75,
+                        px: 1,
+                        mb: 1.25,
                         bgcolor: '#fff1f2',
                         border: '1px dashed #fecdd3',
                         borderRadius: 1.5,
                       }}
                     >
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.5 }}>
-                        <ContentCutIcon sx={{ color: '#E60023', fontSize: 14 }} />
-                        <Typography variant="caption" fontWeight={700} color="#E60023">
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.25 }}>
+                        <ContentCutIcon sx={{ color: '#E60023', fontSize: 13 }} />
+                        <Typography variant="caption" fontWeight={700} color="#E60023" sx={{ fontSize: 11 }}>
                           Board Title (Max 50 Chars):
                         </Typography>
                       </Box>
                       <Typography
                         variant="caption"
-                        sx={{ fontFamily: 'monospace', fontWeight: 600, color: '#334155' }}
+                        sx={{ fontFamily: 'monospace', fontWeight: 600, color: '#334155', fontSize: 11 }}
                         noWrap
                       >
                         "{deal.truncatedTitle}" ({deal.truncatedTitle.length} chars)
                       </Typography>
                     </Paper>
 
-                    {/* Price & Actions */}
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1 }}>
-                        <Typography variant="h6" fontWeight={800} color="text.primary" sx={{ fontSize: '1.1rem' }}>
+                    {/* Price & Actions (Anchored to Card Bottom with mt: auto) */}
+                    <Box
+                      sx={{
+                        mt: 'auto',
+                        pt: 1.25,
+                        borderTop: '1px solid #f1f5f9',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.75 }}>
+                        <Typography variant="h6" fontWeight={800} color="text.primary" sx={{ fontSize: '1.05rem', lineHeight: 1 }}>
                           {deal.price}
                         </Typography>
                         {deal.originalPrice && (
-                          <Typography variant="caption" sx={{ textDecoration: 'line-through', color: '#94a3b8' }}>
+                          <Typography variant="caption" sx={{ textDecoration: 'line-through', color: '#94a3b8', fontSize: 11 }}>
                             {deal.originalPrice}
                           </Typography>
                         )}
                       </Box>
 
-                      <Box sx={{ display: 'flex', gap: 0.75 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                         <Tooltip title="View Amazon Product">
                           <IconButton
                             size="small"
                             component="a"
-                            href={deal.dealUrl}
+                            href={deal.dealUrl || deal.productUrl}
                             target="_blank"
-                            sx={{ border: '1px solid #e2e8f0', color: '#64748b' }}
+                            sx={{ border: '1px solid #e2e8f0', color: '#64748b', p: 0.6 }}
                           >
-                            <OpenInNewIcon fontSize="small" />
+                            <OpenInNewIcon sx={{ fontSize: 15 }} />
                           </IconButton>
                         </Tooltip>
 
-                        <Tooltip title="Open Pinterest Pin Creation Link">
+                        <Tooltip title="Open Pinterest Pin Link / Creator">
                           <IconButton
                             size="small"
                             component="a"
@@ -751,10 +898,11 @@ export const PageDeckView: React.FC<PageDeckViewProps> = ({
                               bgcolor: isActive ? '#E60023' : '#fff1f2',
                               color: isActive ? '#fff' : '#E60023',
                               border: '1px solid #fecdd3',
+                              p: 0.6,
                               '&:hover': { bgcolor: '#E60023', color: '#fff' },
                             }}
                           >
-                            <ShareIcon fontSize="small" />
+                            <ShareIcon sx={{ fontSize: 15 }} />
                           </IconButton>
                         </Tooltip>
                       </Box>

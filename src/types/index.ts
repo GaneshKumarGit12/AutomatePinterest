@@ -20,9 +20,24 @@ export interface ProductDeal {
   cardIndex: number;
   processedAt?: string;
   success?: boolean;
-  status?: 'success' | 'failed';
+  status?: 'success' | 'failed' | 'pinned' | 'pending';
+  statusLabel?: string;
+  isPinned?: boolean;
+  pinnedAt?: string;
   collaborators?: string[];
   error?: string;
+}
+
+export interface DealsResponse {
+  deals: ProductDeal[];
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  totalProducts: number;
+  pendingCount?: number;
+  pinnedCount?: number;
+  totalCatalog?: number;
+  filter?: 'pending' | 'pinned' | 'all';
 }
 
 export interface RunConfig {
