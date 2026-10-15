@@ -11,6 +11,9 @@ export interface ProductDeal {
   discount?: string;
   tag?: string;
   dealUrl?: string;
+  productUrl?: string;
+  amazonUrl?: string;
+  pinterestUrl?: string;
   shareUrl?: string;
   imageUrl?: string;
   pageNumber: number;

@@ -114,6 +114,7 @@ def export_facebook_shares_excel(
         "ASIN / ID",
         "Product Title",
         "Amazon.in Deal URL",
+        "Pinterest Link",
         "Target Facebook Destination",
         "Status",
         "Date & Time",
@@ -135,7 +136,8 @@ def export_facebook_shares_excel(
     for idx, r in enumerate(results, 1):
         status_val = (r.get("status") or "success").upper()
         pin_id = str(r.get("asin") or r.get("pinId") or "")
-        pin_url = r.get("dealUrl") or r.get("pinUrl") or (f"https://www.amazon.in/dp/{pin_id}?tag=ganeshd12-21" if pin_id else "")
+        amazon_url = r.get("amazonUrl") or r.get("dealUrl") or (f"https://www.amazon.in/dp/{pin_id}?tag=ganeshd12-21" if pin_id else "")
+        pinterest_url = r.get("pinterestUrl") or (r.get("pinUrl") if "pinterest.com" in str(r.get("pinUrl", "")) else None) or os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
         title = r.get("title") or ""
         target = r.get("target") or "WorldNewzs Page + Amazon Affiliate Group"
         timestamp = r.get("date") or r.get("timestamp") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -147,16 +149,23 @@ def export_facebook_shares_excel(
         ws.cell(row=current_row, column=3, value=title).alignment = Alignment(horizontal="left", vertical="center")
         
         # Hyperlinked Amazon Deal URL
-        url_cell = ws.cell(row=current_row, column=4, value=pin_url)
-        url_cell.alignment = Alignment(horizontal="left", vertical="center")
-        if pin_url.startswith("http"):
-            url_cell.hyperlink = pin_url
-            url_cell.font = Font(name="Calibri", size=10, color="1D4ED8", underline="single")
+        amz_cell = ws.cell(row=current_row, column=4, value=amazon_url)
+        amz_cell.alignment = Alignment(horizontal="left", vertical="center")
+        if amazon_url.startswith("http"):
+            amz_cell.hyperlink = amazon_url
+            amz_cell.font = Font(name="Calibri", size=10, color="1D4ED8", underline="single")
 
-        ws.cell(row=current_row, column=5, value=target).alignment = Alignment(horizontal="left", vertical="center")
+        # Hyperlinked Pinterest Link
+        pin_cell = ws.cell(row=current_row, column=5, value=pinterest_url)
+        pin_cell.alignment = Alignment(horizontal="left", vertical="center")
+        if pinterest_url.startswith("http"):
+            pin_cell.hyperlink = pinterest_url
+            pin_cell.font = Font(name="Calibri", size=10, color="E60023", underline="single")
+
+        ws.cell(row=current_row, column=6, value=target).alignment = Alignment(horizontal="left", vertical="center")
         
         # Status Pill
-        status_cell = ws.cell(row=current_row, column=6, value=status_val)
+        status_cell = ws.cell(row=current_row, column=7, value=status_val)
         status_cell.alignment = Alignment(horizontal="center", vertical="center")
         if status_val == "SUCCESS":
             status_cell.fill = success_fill
@@ -168,18 +177,18 @@ def export_facebook_shares_excel(
             status_cell.fill = failed_fill
             status_cell.font = failed_font
 
-        ws.cell(row=current_row, column=7, value=timestamp).alignment = Alignment(horizontal="center", vertical="center")
-        ws.cell(row=current_row, column=8, value=post_text[:120]).alignment = Alignment(horizontal="left", vertical="center")
-        ws.cell(row=current_row, column=9, value=os.path.basename(proof_img)).alignment = Alignment(horizontal="left", vertical="center")
+        ws.cell(row=current_row, column=8, value=timestamp).alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row=current_row, column=9, value=post_text[:120]).alignment = Alignment(horizontal="left", vertical="center")
+        ws.cell(row=current_row, column=10, value=os.path.basename(proof_img)).alignment = Alignment(horizontal="left", vertical="center")
 
-        for c_idx in range(1, 10):
+        for c_idx in range(1, 11):
             ws.cell(row=current_row, column=c_idx).border = thin_border
 
         ws.row_dimensions[current_row].height = 22
         current_row += 1
 
     # Auto-fit column widths
-    column_widths = {1: 8, 2: 24, 3: 38, 4: 40, 5: 32, 6: 14, 7: 22, 8: 45, 9: 35}
+    column_widths = {1: 8, 2: 22, 3: 35, 4: 38, 5: 38, 6: 30, 7: 14, 8: 20, 9: 45, 10: 30}
     for col_idx, width in column_widths.items():
         col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = width

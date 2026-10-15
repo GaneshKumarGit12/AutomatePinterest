@@ -63,6 +63,9 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     pinUrl: string;
     dealUrl?: string;
     destinationLink?: string;
+    amazonUrl?: string;
+    pinterestUrl?: string;
+    shareUrl?: string;
     imageUrl: string;
     pageNumber?: number;
     cardIndex?: number;
@@ -579,7 +582,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             <a href="https://www.facebook.com/groups/1761596288324903/" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>
               Amazon Affiliate Group
             </a>
-            . Completed items auto-clear immediately after posting.
+            . Completed items auto-clear immediately after posting. Each post automatically mentions both <strong>Amazon Product Link</strong> & <strong>Pinterest Link</strong> for dual audience engagement.
           </Typography>
         </Box>
 
@@ -1749,7 +1752,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
 
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                         {directAmazonUrl && (
-                          <Tooltip title={`Open Amazon.in Product (${directAmazonUrl})`} arrow>
+                          <Tooltip title={`Open Amazon Product Link (${directAmazonUrl})`} arrow>
                             <IconButton
                               size="small"
                               onClick={() => window.open(directAmazonUrl, '_blank')}
@@ -1759,6 +1762,15 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                             </IconButton>
                           </Tooltip>
                         )}
+                        <Tooltip title={`Open Pinterest Link (${pin.pinterestUrl || 'https://in.pinterest.com/ganeshkumardevarasetty/_created/'})`} arrow>
+                          <IconButton
+                            size="small"
+                            onClick={() => window.open(pin.pinterestUrl || pin.shareUrl || 'https://in.pinterest.com/ganeshkumardevarasetty/_created/', '_blank')}
+                            sx={{ p: 0.4, color: '#E60023', border: '1px solid #FECDD3', bgcolor: '#FFF1F2', borderRadius: 1.5 }}
+                          >
+                            <PushPinIcon sx={{ fontSize: 13 }} />
+                          </IconButton>
+                        </Tooltip>
                         <Button
                           size="small"
                           variant="contained"

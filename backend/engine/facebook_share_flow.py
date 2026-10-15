@@ -1340,9 +1340,11 @@ async def execute_pinterest_facebook_share(
                 deal_image_url = img_checkpoint["imageUrl"]
 
             post_data = ContentShuffler.generate_post(deal_item, ledger)
+            resolved_amazon_url = post_data.get("amazonUrl") or deal_url
+            resolved_pinterest_url = post_data.get("pinterestUrl") or os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
             post_text = post_data.get(
                 "text",
-                f"🔥 {deal_discount}! {deal_title}\n💰 Deal Price: {deal_price}\n\n🛒 Grab this deal: {deal_url}",
+                f"🔥 {deal_discount}! {deal_title}\n💰 Deal Price: {deal_price}\n\n🛒 Amazon Product Link: {resolved_amazon_url}\n📌 Pinterest Link: {resolved_pinterest_url}\n🌐 More Deals: https://worldnewzs.in/amazon-products",
             )
             log("info", f"📝 Shuffled Amazon Copy: \"{post_text[:75].replace(chr(10), ' ')}...\"")
 
@@ -1412,8 +1414,10 @@ async def execute_pinterest_facebook_share(
 
                 results.append({
                     "pinIndex": deal_idx,
-                    "pinUrl": deal_url,
-                    "dealUrl": deal_url,
+                    "pinUrl": resolved_pinterest_url,
+                    "dealUrl": resolved_amazon_url,
+                    "amazonUrl": resolved_amazon_url,
+                    "pinterestUrl": resolved_pinterest_url,
                     "pinId": asin,
                     "asin": asin,
                     "title": deal_title,

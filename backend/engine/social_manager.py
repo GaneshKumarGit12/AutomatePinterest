@@ -525,13 +525,29 @@ class ContentShuffler:
         price = str(deal.get("price") or "").strip()
         original_price = str(deal.get("originalPrice") or "").strip()
         discount = str(deal.get("discount") or "").strip()
-        deal_url = (
-            deal.get("dealUrl")
+        asin = str(deal.get("asin") or deal.get("pinId") or "").strip()
+
+        # 1. Resolve Amazon Product Link
+        amazon_url = (
+            deal.get("amazonUrl")
             or deal.get("productUrl")
-            or deal.get("pinUrl")
-            or deal.get("shareUrl")
-            or "https://worldnewzs.in/amazon-products"
+            or deal.get("dealUrl")
         )
+        if not amazon_url or not str(amazon_url).startswith("http"):
+            if asin and not asin.startswith("deal-") and not asin.startswith("P"):
+                amazon_url = f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
+            else:
+                amazon_url = "https://worldnewzs.in/amazon-products"
+
+        # 2. Resolve Pinterest Link (Dhanvi Collections profile / pin link)
+        raw_pin = str(deal.get("pinterestUrl") or deal.get("pinUrl") or "").strip()
+        if raw_pin.startswith("http") and "pinterest.com" in raw_pin and "pin/create" not in raw_pin:
+            pinterest_url = raw_pin
+        elif deal.get("pinId") and str(deal.get("pinId")).isdigit():
+            pinterest_url = f"https://in.pinterest.com/pin/{deal.get('pinId')}/"
+        else:
+            pinterest_url = os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
+
         category = cls.detect_category(deal.get("category") or deal.get("tag") or "", full_title)
 
         if discount:
@@ -546,7 +562,6 @@ class ContentShuffler:
 
         for _ in range(10):
             emoji = random.choice(EMOJIS)
-            cta = random.choice(CTAS)
             hashtags = cls.sample_hashtags(category)
             pattern_id = random.randint(1, 4)
 
@@ -562,8 +577,9 @@ class ContentShuffler:
 
             full_text = (
                 f"{body.strip()}\n\n"
-                f"{cta} {deal_url}\n"
-                f"🌐 More Deals: https://worldnewzs.in/amazon-products\n\n"
+                f"🛒 Amazon Product Link: {amazon_url}\n"
+                f"📌 Pinterest Link: {pinterest_url}\n"
+                f"🌐 More Live Deals: https://worldnewzs.in/amazon-products\n\n"
                 f"{hashtags}"
             ).strip()
 
@@ -573,8 +589,10 @@ class ContentShuffler:
                     "patternId": pattern_id,
                     "hashtags": hashtags,
                     "category": category,
-                    "pinUrl": deal_url,
-                    "dealUrl": deal_url,
+                    "amazonUrl": amazon_url,
+                    "pinterestUrl": pinterest_url,
+                    "pinUrl": pinterest_url,
+                    "dealUrl": amazon_url,
                 }
 
         rand_salt = f"#{random.randint(100, 999)}"
@@ -582,15 +600,18 @@ class ContentShuffler:
             "text": (
                 f"{random.choice(EMOJIS)} {short_title}\n"
                 f"💰 Deal Price: {price}{mrp_note} ({discount_badge}) {rand_salt}\n\n"
-                f"{random.choice(CTAS)} {deal_url}\n"
-                f"🌐 More Deals: https://worldnewzs.in/amazon-products\n\n"
+                f"🛒 Amazon Product Link: {amazon_url}\n"
+                f"📌 Pinterest Link: {pinterest_url}\n"
+                f"🌐 More Live Deals: https://worldnewzs.in/amazon-products\n\n"
                 f"{cls.sample_hashtags(category)}"
             ),
             "patternId": 0,
             "hashtags": cls.sample_hashtags(category),
             "category": category,
-            "pinUrl": deal_url,
-            "dealUrl": deal_url,
+            "amazonUrl": amazon_url,
+            "pinterestUrl": pinterest_url,
+            "pinUrl": pinterest_url,
+            "dealUrl": amazon_url,
         }
 
 
