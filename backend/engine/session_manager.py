@@ -12,9 +12,33 @@ except ImportError:
     Page = Any  # type: ignore
 
 USER_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "user_data", "automation_session"))
+SESSIONS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "user_data", "sessions"))
 
 _playwright_instance = None
 _persistent_context: Optional[BrowserContext] = None
+_persistent_contexts: Dict[str, Any] = {}
+
+
+def get_session_dir(session_name: Optional[str] = None) -> str:
+    """
+    Resolves persistent user data dir. Default and Facebook accounts share
+    USER_DATA_DIR (automation_session) so existing logins remain active.
+    Instagram and Threads use dedicated isolated subdirectories.
+    """
+    if not session_name:
+        return USER_DATA_DIR
+    s_low = str(session_name).replace("-", "_").lower()
+    if s_low in ["default", "automation_session", "facebook_shared", "facebook_main", "worldnewzs", "latestnews", "facebook_group"]:
+        return USER_DATA_DIR
+    if "insta" in s_low:
+        session_dir = os.path.join(SESSIONS_ROOT, "product_insta")
+    elif "thread" in s_low:
+        session_dir = os.path.join(SESSIONS_ROOT, "product_threads")
+    else:
+        clean_name = "".join(c for c in session_name if c.isalnum() or c in ("-", "_")).lower()
+        session_dir = os.path.join(SESSIONS_ROOT, clean_name)
+    os.makedirs(session_dir, exist_ok=True)
+    return session_dir
 
 
 def kill_stale_automation_processes():
@@ -166,19 +190,36 @@ async def get_active_ip_info() -> Dict[str, Any]:
     return info
 
 
-async def get_browser_context() -> BrowserContext:
+async def get_browser_context(session_name: Optional[str] = None) -> BrowserContext:
     """Launches or returns the headful persistent browser context with multi-tier fallback, proxy, and stealth."""
-    global _playwright_instance, _persistent_context
+    global _playwright_instance, _persistent_context, _persistent_contexts
 
-    if _persistent_context:
+    data_dir = get_session_dir(session_name)
+
+    # Check cached context for this session data_dir
+    existing_ctx = _persistent_contexts.get(data_dir)
+    if existing_ctx:
         try:
-            if len(_persistent_context.pages) > 0:
-                return _persistent_context
+            if len(existing_ctx.pages) > 0:
+                if not session_name or session_name in ["default", "automation_session", "facebook_shared"]:
+                    _persistent_context = existing_ctx
+                return existing_ctx
         except Exception:
-            _persistent_context = None
+            _persistent_contexts.pop(data_dir, None)
+            if _persistent_context == existing_ctx:
+                _persistent_context = None
+
+    if not session_name or session_name in ["default", "automation_session", "facebook_shared"]:
+        if _persistent_context:
+            try:
+                if len(_persistent_context.pages) > 0:
+                    _persistent_contexts[data_dir] = _persistent_context
+                    return _persistent_context
+            except Exception:
+                _persistent_context = None
 
     kill_stale_automation_processes()
-    clean_stale_lockfiles(USER_DATA_DIR)
+    clean_stale_lockfiles(data_dir)
 
     if not _playwright_instance:
         _playwright_instance = await async_playwright().start()
@@ -198,7 +239,7 @@ async def get_browser_context() -> BrowserContext:
     # Attempt 1: Native Edge persistent profile
     try:
         launch_kwargs = {
-            "user_data_dir": USER_DATA_DIR,
+            "user_data_dir": data_dir,
             "channel": "msedge",
             "headless": False,
             "viewport": None,
@@ -209,20 +250,23 @@ async def get_browser_context() -> BrowserContext:
         if proxy_cfg:
             launch_kwargs["proxy"] = proxy_cfg
 
-        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
-        _persistent_context.set_default_timeout(15000)
-        _persistent_context.set_default_navigation_timeout(60000)
+        ctx = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs)
+        ctx.set_default_timeout(15000)
+        ctx.set_default_navigation_timeout(60000)
         try:
-            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+            await ctx.add_init_script(STEALTH_EVASION_SCRIPT)
         except Exception:
             pass
-        return _persistent_context
+        _persistent_contexts[data_dir] = ctx
+        if not session_name or session_name in ["default", "automation_session", "facebook_shared"]:
+            _persistent_context = ctx
+        return ctx
     except Exception as e1:
-        print(f"[Session] Attempt 1 failed (Edge persistent): {e1}")
+        print(f"[Session] Attempt 1 failed (Edge persistent for {os.path.basename(data_dir)}): {e1}")
 
     # Attempt 2: Chromium persistent profile
     try:
-        fresh_dir = os.path.join(USER_DATA_DIR, "fresh_profile")
+        fresh_dir = os.path.join(data_dir, "fresh_profile")
         clean_stale_lockfiles(fresh_dir)
         launch_kwargs2 = {
             "user_data_dir": fresh_dir,
@@ -235,16 +279,19 @@ async def get_browser_context() -> BrowserContext:
         if proxy_cfg:
             launch_kwargs2["proxy"] = proxy_cfg
 
-        _persistent_context = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs2)
-        _persistent_context.set_default_timeout(15000)
-        _persistent_context.set_default_navigation_timeout(60000)
+        ctx = await _playwright_instance.chromium.launch_persistent_context(**launch_kwargs2)
+        ctx.set_default_timeout(15000)
+        ctx.set_default_navigation_timeout(60000)
         try:
-            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+            await ctx.add_init_script(STEALTH_EVASION_SCRIPT)
         except Exception:
             pass
-        return _persistent_context
+        _persistent_contexts[data_dir] = ctx
+        if not session_name or session_name in ["default", "automation_session", "facebook_shared"]:
+            _persistent_context = ctx
+        return ctx
     except Exception as e2:
-        print(f"[Session] Attempt 2 failed (Chromium persistent): {e2}")
+        print(f"[Session] Attempt 2 failed (Chromium persistent for {os.path.basename(data_dir)}): {e2}")
 
     # Attempt 3: Standard headful browser launch (guaranteed success)
     try:
@@ -260,30 +307,50 @@ async def get_browser_context() -> BrowserContext:
         context_kwargs = {"viewport": None}
         if proxy_cfg:
             context_kwargs["proxy"] = proxy_cfg
-        _persistent_context = await browser.new_context(**context_kwargs)
-        _persistent_context.set_default_timeout(15000)
-        _persistent_context.set_default_navigation_timeout(60000)
+        ctx = await browser.new_context(**context_kwargs)
+        ctx.set_default_timeout(15000)
+        ctx.set_default_navigation_timeout(60000)
         try:
-            await _persistent_context.add_init_script(STEALTH_EVASION_SCRIPT)
+            await ctx.add_init_script(STEALTH_EVASION_SCRIPT)
         except Exception:
             pass
-        return _persistent_context
+        _persistent_contexts[data_dir] = ctx
+        if not session_name or session_name in ["default", "automation_session", "facebook_shared"]:
+            _persistent_context = ctx
+        return ctx
     except Exception as e3:
         print(f"[Session] Attempt 3 failed (Standard browser): {e3}")
         raise e3
 
 
-async def close_browser_context():
+async def close_browser_context(session_name: Optional[str] = None):
     """Closes active persistent context cleanly."""
-    global _persistent_context, _playwright_instance
-    if _persistent_context:
-        try:
-            await _persistent_context.close()
-        except Exception:
-            pass
-        _persistent_context = None
+    global _persistent_context, _playwright_instance, _persistent_contexts
+    if session_name:
+        data_dir = get_session_dir(session_name)
+        ctx = _persistent_contexts.pop(data_dir, None)
+        if ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        if _persistent_context == ctx:
+            _persistent_context = None
+    else:
+        for d_dir, ctx in list(_persistent_contexts.items()):
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        _persistent_contexts.clear()
+        if _persistent_context:
+            try:
+                await _persistent_context.close()
+            except Exception:
+                pass
+            _persistent_context = None
 
-    if _playwright_instance:
+    if len(_persistent_contexts) == 0 and _playwright_instance:
         try:
             await _playwright_instance.stop()
         except Exception:

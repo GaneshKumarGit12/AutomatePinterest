@@ -42,8 +42,85 @@ import FilterListIcon from '@mui/icons-material/FilterList';
 import LaunchIcon from '@mui/icons-material/Launch';
 import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import PhotoCameraIcon from '@mui/icons-material/PhotoCamera';
+import InstagramIcon from '@mui/icons-material/Instagram';
+import AlternateEmailIcon from '@mui/icons-material/AlternateEmail';
 import { api } from '../services/api.ts';
 import { sseClient } from '../services/sse.ts';
+
+export const CHANNEL_CONFIGS = [
+  {
+    key: 'facebook_main',
+    name: 'Facebook Main',
+    badge: 'FB Main',
+    account: 'ganeshkumard56',
+    url: 'https://www.facebook.com/ganeshkumard56/',
+    icon: '👤',
+    color: '#1877F2',
+    bg: '#EFF6FF',
+    border: '#BFDBFE',
+    desc: 'Personal Profile Feed & Story',
+  },
+  {
+    key: 'worldnewzs',
+    name: 'WorldNewzs',
+    badge: 'WorldNewzs',
+    account: 'Page #61589266599006',
+    url: 'https://www.facebook.com/profile.php?id=61589266599006',
+    icon: '📰',
+    color: '#2563EB',
+    bg: '#EFF6FF',
+    border: '#93C5FD',
+    desc: 'WorldNewzs News Brand Page',
+  },
+  {
+    key: 'latestnews',
+    name: 'LatestNews',
+    badge: 'LatestNews',
+    account: 'Page #61589391814601',
+    url: 'https://www.facebook.com/profile.php?id=61589391814601',
+    icon: '⚡',
+    color: '#0284C7',
+    bg: '#F0F9FF',
+    border: '#BAE6FD',
+    desc: 'Flash & Breaking Deals Page',
+  },
+  {
+    key: 'product_insta',
+    name: 'ProductInsta',
+    badge: 'Insta',
+    account: '@ganeshkumard12',
+    url: 'https://www.instagram.com/ganeshkumard12/',
+    icon: '📸',
+    color: '#E1306C',
+    bg: '#FDF2F8',
+    border: '#FBCFE8',
+    desc: 'Instagram Photo Feed & Bio CTA',
+  },
+  {
+    key: 'product_threads',
+    name: 'ProductThreads',
+    badge: 'Threads',
+    account: '@ganeshkumard12',
+    url: 'https://www.threads.net/@ganeshkumard12',
+    icon: '🧵',
+    color: '#111827',
+    bg: '#F3F4F6',
+    border: '#E5E7EB',
+    desc: 'Threads Punchy Micro-Cards',
+  },
+  {
+    key: 'facebook_group',
+    name: 'Affiliate Group',
+    badge: 'Group',
+    account: 'Group #1761596288324903',
+    url: 'https://www.facebook.com/groups/1761596288324903/',
+    icon: '👥',
+    color: '#059669',
+    bg: '#ECFDF5',
+    border: '#A7F3D0',
+    desc: 'Amazon Affiliate Community',
+  },
+];
 
 interface SocialMediaHubProps {
   onSync?: () => Promise<void>;
@@ -73,7 +150,15 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     serialNumber?: number;
     status: 'posted' | 'pending';
     statusLabel: string;
+    postedChannels?: string[];
   }>>([]);
+  const [selectedChannels, setSelectedChannels] = useState<string[]>([
+    'facebook_main',
+    'worldnewzs',
+    'latestnews',
+    'product_insta',
+    'product_threads',
+  ]);
   const [pinPage, setPinPage] = useState<number>(1);
   const [endPage, setEndPage] = useState<number>(1);
   const [pinPageSize] = useState<number>(6);
@@ -374,12 +459,32 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
     }
   };
 
+  const handleLaunchSession = async (channelKey: string) => {
+    try {
+      const chName = CHANNEL_CONFIGS.find((c) => c.key === channelKey)?.name || channelKey;
+      setStatusMessage({
+        text: `🌐 Launching native browser session for ${chName}... Complete any login/verification, then close the browser.`,
+        severity: 'info',
+      });
+      const res = await api.launchChannelSession(channelKey);
+      setStatusMessage({
+        text: res.message || `Browser opened for ${chName}.`,
+        severity: 'success',
+      });
+    } catch (e: any) {
+      setStatusMessage({
+        text: `Error launching session: ${e.message || e}`,
+        severity: 'error',
+      });
+    }
+  };
+
   const handlePinterestFacebookShare = async (singleProductId?: string) => {
     if (isFbShareRunning) return;
     wasRunningRef.current = true;
     setIsFbShareRunning(true);
     setShowInlineLiveMonitor(true);
-    setFbShareStep({ step: 1, message: 'Verifying Facebook session & WorldNewzs Page identity...' });
+    setFbShareStep({ step: 1, message: 'Verifying session & channel credentials...' });
 
     const specificIds = singleProductId
       ? [singleProductId]
@@ -397,15 +502,19 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
       ? Math.max(1, pendingCount)
       : fbSharePinCount;
 
-    const destLabel = fbDestination === 'both' ? 'WorldNewzs Page & Group' : fbDestination === 'page' ? 'WorldNewzs Page Feed' : 'Amazon Affiliate Group';
+    const effectiveDestinations = selectedChannels.length > 0 ? selectedChannels : ['facebook_main', 'worldnewzs', 'latestnews', 'product_insta', 'product_threads'];
+    const destLabel = effectiveDestinations
+      .map((k) => CHANNEL_CONFIGS.find((c) => c.key === k)?.name || k)
+      .join(', ');
+
     setStatusMessage({
-      text: `🚀 Starting WorldNewzs Amazon Products → Facebook Automation (${
+      text: `🚀 Starting Multi-Account Social Automation (${
         specificIds
           ? `${specificIds.length} selected product(s)`
           : pagesSpan > 1
           ? `Page ${pinPage} to ${effectiveEndPage} (${countToShare} products, 6/page)`
           : `Page ${pinPage} (${countToShare} products)`
-      } to ${destLabel}, ${fbShareDelay}s interval)...`,
+      } to [${destLabel}], ${fbShareDelay}s interval)...`,
       severity: 'info',
     });
     try {
@@ -413,17 +522,18 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
         pinCount: countToShare,
         delaySeconds: fbShareDelay,
         specificPinIds: specificIds,
-        destination: fbDestination,
+        destination: effectiveDestinations.includes('worldnewzs') && effectiveDestinations.includes('facebook_group') ? 'both' : effectiveDestinations.includes('facebook_group') ? 'group' : 'page',
+        destinations: effectiveDestinations,
         startPage: pinPage,
         endPage: specificIds ? undefined : effectiveEndPage,
       });
       setStatusMessage({
-        text: res.message || 'WorldNewzs → Facebook automation started!',
+        text: res.message || 'Multi-Account Social automation started!',
         severity: 'success',
       });
     } catch (err: any) {
       setStatusMessage({
-        text: `WorldNewzs → Facebook share failed: ${err.message || err}`,
+        text: `Social Hub share failed: ${err.message || err}`,
         severity: 'error',
       });
       wasRunningRef.current = false;
@@ -561,10 +671,10 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
               <FacebookIcon />
             </Box>
             <Typography variant="h5" fontWeight={800} color="#0F172A">
-              Facebook Automation Hub
+              Facebook & Social Hub
             </Typography>
             <Chip
-              label="worldnewzs.in/amazon-products (6/Page) → WorldNewzs Page & Affiliate Group"
+              label="Multi-Account: FB Main • WorldNewzs • LatestNews • Instagram • Threads"
               size="small"
               sx={{ bgcolor: '#EFF6FF', color: '#1D4ED8', fontWeight: 800, fontSize: '0.75rem' }}
             />
@@ -574,15 +684,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             <a href="https://worldnewzs.in/amazon-products" target="_blank" rel="noreferrer" style={{ color: '#D97706', fontWeight: 800, textDecoration: 'none' }}>
               worldnewzs.in/amazon-products
             </a>{' '}
-            (<strong>6 products per page</strong>, matching Amazon Deal Cards) directly to{' '}
-            <a href="https://www.facebook.com/profile.php?id=61589266599006" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>
-              WorldNewzs Facebook Page
-            </a>{' '}
-            &{' '}
-            <a href="https://www.facebook.com/groups/1761596288324903/" target="_blank" rel="noreferrer" style={{ color: '#1877F2', fontWeight: 700, textDecoration: 'none' }}>
-              Amazon Affiliate Group
-            </a>
-            . Completed items auto-clear immediately after posting. Each post automatically mentions both <strong>Amazon Product Link</strong> & <strong>Pinterest Link</strong> for dual audience engagement.
+            (<strong>6 products per page</strong>) with <strong>tailored copy per account</strong> across Facebook Main (ganeshkumard56), WorldNewzs Page, LatestNews Page, Instagram (@ganeshkumard12), Threads, and Amazon Affiliate Group.
           </Typography>
         </Box>
 
@@ -611,6 +713,134 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           />
         </Box>
       </Box>
+
+      {/* ── Multi-Account Channel Selection Matrix ── */}
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 2,
+          mb: 2,
+          borderRadius: 2.5,
+          bgcolor: '#FFFFFF',
+          borderColor: '#E2E8F0',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
+        }}
+      >
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography variant="subtitle2" fontWeight={800} color="#0F172A">
+              🎯 Target Accounts & Channels ({selectedChannels.length}/6 Active)
+            </Typography>
+            <Chip
+              label="Unique Content Per Account • Reusable HD Media"
+              size="small"
+              sx={{ bgcolor: '#FEF3C7', color: '#92400E', fontWeight: 800, fontSize: '0.68rem', height: 20 }}
+            />
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+            <Typography variant="caption" color="text.secondary" fontWeight={700}>
+              Presets:
+            </Typography>
+            <Button
+              size="small"
+              onClick={() => setSelectedChannels(CHANNEL_CONFIGS.map((c) => c.key))}
+              sx={{ textTransform: 'none', fontSize: '0.72rem', py: 0.2, px: 1, minHeight: 22, fontWeight: 700 }}
+            >
+              🌟 All Channels
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setSelectedChannels(['facebook_main', 'worldnewzs', 'latestnews', 'facebook_group'])}
+              sx={{ textTransform: 'none', fontSize: '0.72rem', py: 0.2, px: 1, minHeight: 22, fontWeight: 700 }}
+            >
+              📘 Facebook Only
+            </Button>
+            <Button
+              size="small"
+              onClick={() => setSelectedChannels(['product_insta', 'product_threads'])}
+              sx={{ textTransform: 'none', fontSize: '0.72rem', py: 0.2, px: 1, minHeight: 22, fontWeight: 700 }}
+            >
+              📸 Insta + Threads
+            </Button>
+          </Box>
+        </Box>
+
+        <Grid container spacing={1.2}>
+          {CHANNEL_CONFIGS.map((ch) => {
+            const isChecked = selectedChannels.includes(ch.key);
+            return (
+              <Grid item xs={12} sm={6} md={4} key={ch.key}>
+                <Box
+                  sx={{
+                    p: 1.2,
+                    borderRadius: 2,
+                    border: isChecked ? `2px solid ${ch.color}` : '1px solid #E2E8F0',
+                    bgcolor: isChecked ? ch.bg : '#F8FAFC',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                    '&:hover': {
+                      borderColor: ch.color,
+                      boxShadow: '0 2px 6px rgba(0,0,0,0.06)',
+                    },
+                  }}
+                  onClick={() => {
+                    setSelectedChannels((prev) =>
+                      prev.includes(ch.key) ? prev.filter((k) => k !== ch.key) : [...prev, ch.key]
+                    );
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Checkbox
+                      checked={isChecked}
+                      size="small"
+                      sx={{ p: 0, color: ch.color, '&.Mui-checked': { color: ch.color } }}
+                    />
+                    <Box>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+                        <Typography variant="body2" fontWeight={800} color="#0F172A" sx={{ fontSize: '0.8rem' }}>
+                          {ch.icon} {ch.name}
+                        </Typography>
+                        <Chip
+                          label={ch.account}
+                          size="small"
+                          sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: '#FFFFFF', border: '1px solid #CBD5E1' }}
+                        />
+                      </Box>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.68rem', display: 'block', mt: 0.2 }}>
+                        📁 {ch.desc}
+                      </Typography>
+                    </Box>
+                  </Box>
+
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }} onClick={(e) => e.stopPropagation()}>
+                    <Tooltip title={`Open ${ch.name} page in browser`} arrow>
+                      <IconButton
+                        size="small"
+                        onClick={() => window.open(ch.url, '_blank')}
+                        sx={{ p: 0.4, color: '#64748B', '&:hover': { color: ch.color } }}
+                      >
+                        <OpenInNewIcon sx={{ fontSize: 13 }} />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title={`Launch Edge session for ${ch.name} to verify login`} arrow>
+                      <IconButton
+                        size="small"
+                        onClick={() => handleLaunchSession(ch.key)}
+                        sx={{ p: 0.4, color: '#2563EB', bgcolor: '#EFF6FF', borderRadius: 1.5, border: '1px solid #BFDBFE' }}
+                      >
+                        <LaunchIcon sx={{ fontSize: 13 }} />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                </Box>
+              </Grid>
+            );
+          })}
+        </Grid>
+      </Paper>
 
       {/* ── Unified Action Toolbar ── */}
       <Paper
@@ -819,12 +1049,12 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
             }}
           >
             {isFbShareRunning
-              ? 'Sharing to Facebook...'
+              ? `Posting to ${selectedChannels.length} Channels...`
               : selectedPinIds.size > 0
-              ? `🚀 Share ${selectedPinIds.size} Selected Product(s)`
+              ? `🚀 Post ${selectedPinIds.size} Selected Deals (${selectedChannels.length} Channels)`
               : endPage > pinPage
-              ? `🚀 Share Pages ${pinPage}–${endPage} (${(endPage - pinPage + 1) * 6} Deals)`
-              : `🚀 Share Page ${pinPage} (${fbSharePinCount === 0 ? pendingCount : fbSharePinCount} Deals)`}
+              ? `🚀 Post Pages ${pinPage}–${endPage} (${(endPage - pinPage + 1) * 6} Deals → ${selectedChannels.length} Channels)`
+              : `🚀 Post Page ${pinPage} (${fbSharePinCount === 0 ? pendingCount : fbSharePinCount} Deals → ${selectedChannels.length} Channels)`}
           </Button>
 
           {isFbShareRunning && (
@@ -1127,13 +1357,13 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
           </Box>
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
             {[
-              { n: 1, label: 'FB Session' },
-              { n: 2, label: 'WorldNewzs 6/Page' },
-              { n: 3, label: '1500px Image' },
-              { n: 4, label: 'FB Page' },
-              { n: 5, label: 'FB Group' },
-              { n: 6, label: 'Clear & Record' },
-              { n: 7, label: 'Complete' },
+              { n: 1, label: 'Browser & Auth' },
+              { n: 2, label: 'Deals 6/Page' },
+              { n: 3, label: '1500px HD Media' },
+              { n: 4, label: 'FB Pages & Main' },
+              { n: 5, label: 'Instagram & Threads' },
+              { n: 6, label: 'Ledger & Folders' },
+              { n: 7, label: 'Proof & Excel' },
             ].map((s) => (
               <Chip
                 key={s.n}
@@ -1722,9 +1952,34 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                           />
                         )}
                       </Box>
+
+                      {/* Multi-Account Channel Status Badges */}
+                      <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 1, pt: 0.8, borderTop: '1px dashed #E2E8F0' }}>
+                        {CHANNEL_CONFIGS.map((ch) => {
+                          const postedList = (pin.postedChannels || []).map((x) => String(x).toLowerCase().replace(/-/g, '_'));
+                          const isPostedToCh = postedList.includes(ch.key.toLowerCase().replace(/-/g, '_'));
+                          return (
+                            <Tooltip key={ch.key} title={`${ch.name} (${ch.account}): ${isPostedToCh ? 'Posted ✅' : 'Pending ⏳'}`} arrow>
+                              <Chip
+                                label={`${ch.icon} ${ch.badge}: ${isPostedToCh ? '✅' : '⏳'}`}
+                                size="small"
+                                sx={{
+                                  height: 19,
+                                  fontSize: '0.6rem',
+                                  fontWeight: 800,
+                                  cursor: 'default',
+                                  bgcolor: isPostedToCh ? '#DCFCE7' : '#F1F5F9',
+                                  color: isPostedToCh ? '#15803D' : '#64748B',
+                                  border: isPostedToCh ? '1px solid #86EFAC' : '1px solid #E2E8F0',
+                                }}
+                              />
+                            </Tooltip>
+                          );
+                        })}
+                      </Box>
                     </Box>
 
-                    {/* Footer: ASIN, Amazon.in Link, and 1-Click Share to FB */}
+                    {/* Footer: ASIN, Amazon.in Link, and 1-Click Share to Hub */}
                     <Box
                       sx={{
                         display: 'flex',
@@ -1779,17 +2034,19 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                             setIsFbShareRunning(true);
                             setFbShareStep({ step: 1, message: `Posting ${pin.title.slice(0, 32)}...` });
                             try {
+                              const effDests = selectedChannels.length > 0 ? selectedChannels : ['facebook_main', 'worldnewzs', 'latestnews', 'product_insta', 'product_threads'];
                               await api.pinterestFacebookShare({
                                 pinCount: 1,
                                 delaySeconds: fbShareDelay || 15,
-                                destination: fbDestination,
+                                destination: effDests.includes('worldnewzs') && effDests.includes('facebook_group') ? 'both' : effDests.includes('facebook_group') ? 'group' : 'page',
+                                destinations: effDests,
                                 startPage: pinPage,
                                 endPage: pinPage,
                                 specificPinIds: [pin.pinId],
                               });
                             } catch (e: any) {
                               setIsFbShareRunning(false);
-                              setStatusMessage({ text: e.message || 'Failed to start Facebook share', severity: 'error' });
+                              setStatusMessage({ text: e.message || 'Failed to start Social Hub share', severity: 'error' });
                             }
                           }}
                           sx={{
@@ -1804,7 +2061,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
                             '&:hover': { bgcolor: '#155DB2' },
                           }}
                         >
-                          Share to FB
+                          Post ({selectedChannels.length})
                         </Button>
                       </Box>
                     </Box>

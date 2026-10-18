@@ -259,11 +259,24 @@ export const api = {
     targetBoardUrl?: string;
     specificPinIds?: string[];
     destination?: 'both' | 'page' | 'group';
+    destinations?: string[];
     startPage?: number;
     endPage?: number;
   }) => {
     await ensureApiBase();
     const res = await client.post('/api/social/pinterest-facebook-share', payload);
+    return res.data;
+  },
+
+  getSocialDestinations: async () => {
+    await ensureApiBase();
+    const res = await client.get('/api/social/destinations');
+    return res.data;
+  },
+
+  launchChannelSession: async (channel: string) => {
+    await ensureApiBase();
+    const res = await client.post('/api/social/launch-channel-session', { channel });
     return res.data;
   },
 

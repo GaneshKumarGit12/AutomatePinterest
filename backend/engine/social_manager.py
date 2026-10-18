@@ -51,6 +51,22 @@ HASHTAG_POOLS = {
         "#FashionDeals", "#LifestyleIndia", "#TrendingStyles", "#DailyEssentials",
         "#StyleOnABudget", "#AmazonFashion", "#WardrobeDeals", "#GrabTheDeal"
     ],
+    "beauty_care": [
+        "#BeautyDeals", "#SkincareIndia", "#SelfCareSunday", "#PersonalCare",
+        "#GlowUpEssentials", "#BeautyFinds", "#AmazonBeauty", "#DailyGlow"
+    ],
+    "health_fitness": [
+        "#FitnessDeals", "#HealthAndWellness", "#GymEssentials", "#ActiveLife",
+        "#WorkoutIndia", "#DailyVitamins", "#HealthyLiving", "#AmazonHealth"
+    ],
+    "grocery_gourmet": [
+        "#GourmetDeals", "#GrocerySale", "#KitchenPantry", "#HealthySnacking",
+        "#FoodieFinds", "#AmazonPantry", "#OrganicLiving", "#SuperfoodsIndia"
+    ],
+    "toys_games": [
+        "#ToysAndGames", "#KidsToysIndia", "#FunDeals", "#PlayTime",
+        "#GiftIdeasForKids", "#GamesNight", "#ToyCollector", "#FamilyFun"
+    ],
     "general": [
         "#DealsOfTheDay", "#AmazonIndiaDeals", "#FlashSaleAlert", "#SaveBig",
         "#ShoppingSpree", "#BestDiscounts", "#OnlineDealsIndia", "#ValueForMoney"
@@ -68,8 +84,88 @@ CTAS = [
 ]
 
 
+DESTINATIONS_DIR = os.path.join(STATE_DIR, "destinations")
+
+CHANNEL_DEFINITIONS = {
+    "Facebook_Main": {
+        "id": "Facebook_Main",
+        "folder": "Facebook_Main",
+        "name": "Facebook Main (Personal)",
+        "platform": "facebook",
+        "type": "facebook_profile",
+        "account": os.environ.get("FACEBOOK_ACCOUNT", "ganeshkumard56"),
+        "url": os.environ.get("FACEBOOK_PROFILE_URL", "https://www.facebook.com/ganeshkumard56/"),
+        "color": "#1877F2",
+        "description": "Personal timeline recommendations",
+    },
+    "WorldNewzs": {
+        "id": "WorldNewzs",
+        "folder": "WorldNewzs",
+        "name": "WorldNewzs (Page)",
+        "platform": "facebook",
+        "type": "facebook_page",
+        "account": "61589266599006",
+        "url": os.environ.get("FACEBOOK_PAGE_URL", "https://www.facebook.com/profile.php?id=61589266599006"),
+        "color": "#2563EB",
+        "description": "Official brand page deals & gadgets",
+    },
+    "LatestNews": {
+        "id": "LatestNews",
+        "folder": "LatestNews",
+        "name": "LatestNews (Page)",
+        "platform": "facebook",
+        "type": "facebook_page",
+        "account": "61589391814601",
+        "url": os.environ.get("FACEBOOK_PAGE_2_URL", "https://www.facebook.com/profile.php?id=61589391814601"),
+        "color": "#0284C7",
+        "description": "Breaking daily offers & flash deals",
+    },
+    "ProductInsta": {
+        "id": "ProductInsta",
+        "folder": "ProductInsta",
+        "name": "ProductInsta (Instagram)",
+        "platform": "instagram",
+        "type": "instagram_feed",
+        "account": os.environ.get("INSTAGRAM_ACCOUNT", "@ganeshkumard12"),
+        "url": "https://www.instagram.com/",
+        "color": "#E1306C",
+        "description": "Visual Instagram feed posts with bio CTA",
+    },
+    "ProductThreads": {
+        "id": "ProductThreads",
+        "folder": "ProductThreads",
+        "name": "ProductThreads (Threads)",
+        "platform": "threads",
+        "type": "threads_post",
+        "account": os.environ.get("THREADS_ACCOUNT", "@ganeshkumard12"),
+        "url": "https://www.threads.net/",
+        "color": "#000000",
+        "description": "Conversational micro-posts with rich link preview cards",
+    },
+    "Facebook_Group": {
+        "id": "Facebook_Group",
+        "folder": "Facebook_Group",
+        "name": "Amazon Affiliate Group",
+        "platform": "facebook",
+        "type": "facebook_group",
+        "account": "1761596288324903",
+        "url": os.environ.get("FACEBOOK_GROUP_URL", "https://www.facebook.com/groups/1761596288324903/"),
+        "color": "#059669",
+        "description": "Community Amazon deals group",
+    },
+}
+
+for _ch_key in CHANNEL_DEFINITIONS:
+    _ch_path = os.path.join(DESTINATIONS_DIR, _ch_key)
+    try:
+        os.makedirs(os.path.join(_ch_path, "screenshots"), exist_ok=True)
+        os.makedirs(os.path.join(_ch_path, "temp_media"), exist_ok=True)
+    except OSError:
+        pass
+
+
 class DeduplicationLedger:
-    """Tracks and enforces 5-layer deduplication across Twitter and Facebook."""
+    """Tracks and enforces multi-channel deduplication across Facebook, Instagram, Threads, and Twitter."""
 
     def __init__(self, filepath: str = HISTORY_FILE):
         self.filepath = filepath
@@ -77,6 +173,7 @@ class DeduplicationLedger:
         self._fb_ids_set: set = set()
         self._fb_asins_set: set = set()
         self._fb_titles_set: set = set()
+        self._channel_asins_cache: Dict[str, set] = {ch: set() for ch in CHANNEL_DEFINITIONS}
         self.data: Dict[str, Any] = {
             "shared_pin_ids": [],
             "shared_image_urls": [],
@@ -84,6 +181,7 @@ class DeduplicationLedger:
             "shared_description_hashes": [],
             "facebook_posted_pin_ids": [],
             "facebook_post_records": [],
+            "channel_posted_ids": {ch: [] for ch in CHANNEL_DEFINITIONS},
             "post_logs": []
         }
         self._load()
@@ -139,6 +237,38 @@ class DeduplicationLedger:
         self._fb_asins_set = fb_asins
         self._fb_titles_set = fb_titles
 
+        # Rebuild per-channel lookup sets
+        channel_posted = self.data.setdefault("channel_posted_ids", {})
+        for ch in CHANNEL_DEFINITIONS:
+            if ch not in channel_posted:
+                channel_posted[ch] = []
+            c_set = set()
+            for x in channel_posted[ch]:
+                c_asin = self.extract_asin(x)
+                if c_asin:
+                    c_set.add(c_asin)
+                if x:
+                    c_set.add(str(x).strip())
+            for rec in self.data.get("facebook_post_records", []):
+                if rec.get("channel") == ch and rec.get("status") == "success":
+                    for f in ("pinId", "asin", "pinUrl", "dealUrl"):
+                        val = str(rec.get(f) or "").strip()
+                        if val:
+                            c_set.add(val)
+                            a = self.extract_asin(val)
+                            if a:
+                                c_set.add(a)
+            for l in self.data.get("post_logs", []):
+                if (l.get("channel") == ch or l.get("destination") == ch) and l.get("status") == "success":
+                    for f in ("pinId", "asin", "pinUrl", "dealUrl"):
+                        val = str(l.get(f) or "").strip()
+                        if val:
+                            c_set.add(val)
+                            a = self.extract_asin(val)
+                            if a:
+                                c_set.add(a)
+            self._channel_asins_cache[ch] = c_set
+
     def _load(self):
         try:
             os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
@@ -157,6 +287,23 @@ class DeduplicationLedger:
             self.data["facebook_posted_pin_ids"] = []
         if "facebook_post_records" not in self.data:
             self.data["facebook_post_records"] = []
+        if "channel_posted_ids" not in self.data or not isinstance(self.data["channel_posted_ids"], dict):
+            self.data["channel_posted_ids"] = {ch: [] for ch in CHANNEL_DEFINITIONS}
+        for ch in CHANNEL_DEFINITIONS:
+            self.data["channel_posted_ids"].setdefault(ch, [])
+            ch_hist_file = os.path.join(DESTINATIONS_DIR, ch, "history.json")
+            if os.path.exists(ch_hist_file):
+                try:
+                    with open(ch_hist_file, "r", encoding="utf-8") as f_ch:
+                        ch_data = json.load(f_ch)
+                        ch_items = ch_data if isinstance(ch_data, list) else ch_data.get("records", [])
+                        for r in ch_items:
+                            if r.get("status") == "success":
+                                a = r.get("asin") or self.extract_asin(r.get("pinId") or r.get("pinUrl"))
+                                if a and a not in self.data["channel_posted_ids"][ch]:
+                                    self.data["channel_posted_ids"][ch].append(a)
+                except Exception:
+                    pass
 
         # Backfill facebook_posted_pin_ids from past post_logs if empty
         if not self.data["facebook_posted_pin_ids"]:
@@ -392,6 +539,128 @@ class DeduplicationLedger:
         self.data.setdefault("post_logs", []).append(log_entry)
         self._save()
 
+    def is_posted_to_channel(self, channel: str, pin_id: str, pin_url: str = "", title: str = "") -> bool:
+        """Strictly checks in O(1) if a product has already been posted to a specific channel."""
+        self.ensure_fresh()
+        c_set = self._channel_asins_cache.get(channel, set())
+        cand_id = str(pin_id or "").strip()
+        cand_url = str(pin_url or "").strip()
+        if cand_id and cand_id in c_set:
+            return True
+        if cand_url and cand_url in c_set:
+            return True
+        cand_asin = self.extract_asin(cand_id) or self.extract_asin(cand_url)
+        if cand_asin and cand_asin in c_set:
+            return True
+        return False
+
+    def get_asin_posted_channels(self, val: str) -> List[str]:
+        """Returns the list of channels where this ASIN or URL has been successfully posted."""
+        self.ensure_fresh()
+        asin = self.extract_asin(val) or str(val or "").strip()
+        posted_channels = []
+        for ch, s in self._channel_asins_cache.items():
+            if asin in s or str(val or "").strip() in s:
+                posted_channels.append(ch)
+        return posted_channels
+
+    def record_channel_share(
+        self,
+        channel: str,
+        pin_id: str,
+        pin_url: str,
+        title: str,
+        text: str,
+        target: str,
+        screenshot_path: str = "",
+        status: str = "success",
+        error_message: str = "",
+    ):
+        """Records a successful post into the channel's dedicated folder ledger and the master history."""
+        self.ensure_fresh()
+        pin_id_str = str(pin_id).strip() if pin_id else ""
+        pin_url_str = str(pin_url).strip() if pin_url else ""
+        asin_str = self.extract_asin(pin_id_str) or self.extract_asin(pin_url_str) or pin_id_str
+
+        ch_def = CHANNEL_DEFINITIONS.get(channel, {})
+        platform = ch_def.get("platform", "facebook")
+        target_name = target or ch_def.get("name", channel)
+
+        if status == "success":
+            ch_list = self.data.setdefault("channel_posted_ids", {}).setdefault(channel, [])
+            if asin_str and asin_str not in ch_list:
+                ch_list.append(asin_str)
+            if pin_url_str and pin_url_str not in ch_list:
+                ch_list.append(pin_url_str)
+            if channel in self._channel_asins_cache:
+                if asin_str:
+                    self._channel_asins_cache[channel].add(asin_str)
+                if pin_url_str:
+                    self._channel_asins_cache[channel].add(pin_url_str)
+
+            # Also maintain facebook_posted_pin_ids for backward compatibility
+            fb_pins = self.data.setdefault("facebook_posted_pin_ids", [])
+            if asin_str and asin_str not in fb_pins:
+                fb_pins.append(asin_str)
+            if pin_url_str and pin_url_str not in fb_pins:
+                fb_pins.append(pin_url_str)
+
+        rec_id = f"{channel.lower()}-share-{int(time.time()*1000)}-{random.randint(10, 99)}"
+        iso_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        date_str = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        rec = {
+            "id": rec_id,
+            "channel": channel,
+            "platform": platform,
+            "timestamp": iso_time,
+            "date": date_str,
+            "pinId": asin_str or pin_id_str,
+            "asin": asin_str,
+            "pinUrl": pin_url_str,
+            "dealUrl": pin_url_str,
+            "title": title,
+            "content": text,
+            "target": target_name,
+            "screenshotPath": screenshot_path,
+            "status": status,
+            "error": error_message,
+        }
+
+        # 1. Append to channel dedicated folder state/destinations/<channel>/history.json
+        ch_hist_file = os.path.join(DESTINATIONS_DIR, channel, "history.json")
+        try:
+            ch_records = []
+            if os.path.exists(ch_hist_file):
+                with open(ch_hist_file, "r", encoding="utf-8") as f_in:
+                    ch_data = json.load(f_in)
+                    ch_records = ch_data if isinstance(ch_data, list) else ch_data.get("records", [])
+            ch_records.append(rec)
+            with open(ch_hist_file, "w", encoding="utf-8") as f_out:
+                json.dump(ch_records, f_out, indent=2, ensure_ascii=False)
+        except Exception as e_ch:
+            safe_print(f"[Ledger] Error saving channel history for {channel}: {e_ch}")
+
+        # 2. Append to master facebook_post_records and post_logs
+        self.data.setdefault("facebook_post_records", []).append(rec)
+        self.data.setdefault("post_logs", []).append({
+            "id": rec_id,
+            "channel": channel,
+            "platform": platform,
+            "timestamp": iso_time,
+            "target": target_name,
+            "pinId": asin_str or pin_id_str,
+            "asin": asin_str,
+            "pinUrl": pin_url_str,
+            "dealUrl": pin_url_str,
+            "title": title,
+            "content": text,
+            "screenshotPath": screenshot_path,
+            "status": status,
+            "error": error_message,
+        })
+        self._save()
+
     def mark_all_current_products_as_posted_to_facebook(self, products: List[Dict[str, Any]]) -> int:
         """
         Marks all provided Amazon products as posted to Facebook.
@@ -499,12 +768,20 @@ class ContentShuffler:
     @staticmethod
     def detect_category(category_raw: str, title: str) -> str:
         text = f"{category_raw} {title}".lower()
-        if any(w in text for w in ["electronics", "gadget", "phone", "audio", "headphone", "cable", "watch", "camera"]):
+        if any(w in text for w in ["electronic", "gadget", "phone", "audio", "headphone", "cable", "watch", "camera", "tech", "laptop", "mouse", "keyboard", "charger"]):
             return "electronics"
-        if any(w in text for w in ["kitchen", "home", "cook", "decor", "curtain", "furniture", "stand", "bottle", "bag", "storage"]):
+        if any(w in text for w in ["kitchen", "home", "cook", "decor", "curtain", "furniture", "stand", "bottle", "storage", "bed", "lamp", "cleaner", "appliance"]):
             return "kitchen_home"
-        if any(w in text for w in ["fashion", "cloth", "t-shirt", "shirt", "pant", "shoe", "beauty", "dress", "men", "women"]):
+        if any(w in text for w in ["fashion", "cloth", "t-shirt", "shirt", "pant", "shoe", "dress", "saree", "kurta", "lingerie", "dupatta", "jewellery", "jewelry"]):
             return "fashion_lifestyle"
+        if any(w in text for w in ["beauty", "skin", "serum", "hair", "face", "makeup", "shampoo", "perfume", "cream", "lotion", "soap"]):
+            return "beauty_care"
+        if any(w in text for w in ["health", "fitness", "gym", "yoga", "protein", "supplement", "vitamin", "pain", "ortho"]):
+            return "health_fitness"
+        if any(w in text for w in ["grocery", "gourmet", "honey", "tea", "coffee", "dry fruit", "almond", "food", "snack", "oil"]):
+            return "grocery_gourmet"
+        if any(w in text for w in ["toy", "game", "puzzle", "doll", "kids", "baby", "play"]):
+            return "toys_games"
         return "general"
 
     @classmethod
@@ -519,7 +796,21 @@ class ContentShuffler:
         return " ".join(selected)
 
     @classmethod
-    def generate_post(cls, deal: Dict[str, Any], ledger: Optional[DeduplicationLedger] = None) -> Dict[str, Any]:
+    def generate_channel_post(
+        cls,
+        channel: str,
+        deal: Dict[str, Any],
+        ledger: Optional[DeduplicationLedger] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generates 100% unique, tailored post copy formatted specifically for the target channel:
+        - Facebook_Main: Friendly personal recommendation (first-person, conversational)
+        - WorldNewzs: Brand editorial deal alert (authoritative, specs, hashtags)
+        - LatestNews: Breaking flash savings (urgent, fast-paced, limited time)
+        - ProductInsta: Visual aesthetic layout, clean bullet points, bio CTA, shopping hashtags
+        - ProductThreads: Punchy hook + Amazon affiliate link (triggers native rich card)
+        - Facebook_Group: Community deal announcement
+        """
         full_title = (deal.get("title") or deal.get("truncatedTitle") or "Amazon Deal").strip()
         short_title = full_title[:95].strip() + ("..." if len(full_title) > 95 else "")
         price = str(deal.get("price") or "").strip()
@@ -535,11 +826,11 @@ class ContentShuffler:
         )
         if not amazon_url or not str(amazon_url).startswith("http"):
             if asin and not asin.startswith("deal-") and not asin.startswith("P"):
-                amazon_url = f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
+                amazon_url = f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2&linkId=309384296fe1c1e72569a81c50402f7a&ref_=as_li_ss_tl"
             else:
                 amazon_url = "https://worldnewzs.in/amazon-products"
 
-        # 2. Resolve Pinterest Link (Dhanvi Collections profile / pin link)
+        # 2. Resolve Pinterest Link
         raw_pin = str(deal.get("pinterestUrl") or deal.get("pinUrl") or "").strip()
         if raw_pin.startswith("http") and "pinterest.com" in raw_pin and "pin/create" not in raw_pin:
             pinterest_url = raw_pin
@@ -549,6 +840,17 @@ class ContentShuffler:
             pinterest_url = os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
 
         category = cls.detect_category(deal.get("category") or deal.get("tag") or "", full_title)
+        cat_names = {
+            "electronics": "Electronics & Tech",
+            "kitchen_home": "Home & Kitchen",
+            "fashion_lifestyle": "Fashion & Style",
+            "beauty_care": "Beauty & Personal Care",
+            "health_fitness": "Health & Fitness",
+            "grocery_gourmet": "Grocery & Gourmet Foods",
+            "toys_games": "Toys & Games",
+            "general": "Trending Amazon Finds",
+        }
+        cat_name = cat_names.get(category, "Trending Amazon Finds")
 
         if discount:
             discount_clean = discount.upper().replace("OFF", "").strip()
@@ -559,60 +861,97 @@ class ContentShuffler:
             discount_badge = "LIMITED TIME DEAL"
 
         mrp_note = f" (MRP: {original_price})" if original_price and original_price != price else ""
+        hashtags = cls.sample_hashtags(category)
 
-        for _ in range(10):
-            emoji = random.choice(EMOJIS)
-            hashtags = cls.sample_hashtags(category)
-            pattern_id = random.randint(1, 4)
-
-            if pattern_id == 1 and discount:
-                body = f"{emoji} {discount_badge}! {short_title}\n💰 Deal Price: {price}{mrp_note}"
-            elif pattern_id == 2:
-                body = f"{emoji} Amazon India Price Drop Alert: {short_title}\n⚡ Now Just {price}{mrp_note} ({discount_badge})"
-            elif pattern_id == 3:
-                cat_name = "Home & Kitchen" if category == "kitchen_home" else "Electronics & Tech" if category == "electronics" else "Fashion & Style" if category == "fashion_lifestyle" else "Trending Amazon Finds"
-                body = f"{emoji} Top Pick in {cat_name}: {short_title}\n🏷️ Offer Price: {price}{mrp_note} | {discount_badge}"
-            else:
-                body = f"{emoji} Newly Added on WorldNewzs Amazon Deals: {short_title}\n🔥 Grab it at {price}{mrp_note} ({discount_badge})"
-
-            full_text = (
-                f"{body.strip()}\n\n"
+        # ──────────────────────────────────────────
+        # CHANNEL-TAILORED COPY GENERATION
+        # ──────────────────────────────────────────
+        ch_lower = channel.replace("-", "_").lower()
+        if ch_lower in ("facebook_main", "main"):
+            salutations = [
+                "Hey everyone! 👋 Spotted a really good price drop on Amazon today:",
+                "Hey friends! 😊 If anyone is looking for quality deals, check this out:",
+                "Sharing a quick Amazon find that's currently on discount today! 💡",
+            ]
+            sal = random.choice(salutations)
+            body = (
+                f"{sal}\n\n"
+                f"🏷️ {short_title}\n"
+                f"💰 Deal Price: {price}{mrp_note} ({discount_badge})\n\n"
+                f"🛒 Direct Amazon Link: {amazon_url}\n"
+                f"📌 Details & photos on Pinterest: {pinterest_url}\n\n"
+                f"{hashtags} #PersonalPicks #AmazonDealsIndia"
+            )
+        elif ch_lower in ("latestnews", "latest_news"):
+            body = (
+                f"⚡ BREAKING SAVINGS: {short_title}\n"
+                f"🔥 Limited-Time Flash Deal: Now just {price}{mrp_note} ({discount_badge})!\n\n"
+                f"🛍️ Grab it here: {amazon_url}\n"
+                f"📌 Verified Pin: {pinterest_url}\n"
+                f"🌐 Catch all live drops on worldnewzs.in\n\n"
+                f"{hashtags} #LatestNewsDeals #FlashSaleIndia #PriceDrop"
+            )
+        elif ch_lower in ("productinsta", "product_insta", "instagram"):
+            # Instagram aesthetic format with clear Bio link CTA and no raw unclickable links
+            body = (
+                f"✨ Today's Featured Amazon Find! 🛍️\n\n"
+                f"📌 {short_title}\n"
+                f"💰 Offer Price: {price}{mrp_note} ({discount_badge})\n"
+                f"🏷️ Category: {cat_name}\n"
+                f"📦 Prime Fast Delivery Available\n\n"
+                f"🔗 HOW TO BUY:\n"
+                f"👉 Tap the direct link in our bio (@ganeshkumard12) to shop this deal!\n"
+                f"👉 Or search Amazon ASIN: {asin}\n\n"
+                f"💾 Save this post for later & follow @ganeshkumard12 for daily verified deals!\n\n"
+                f"{hashtags} #AmazonFinds #ProductInsta #DealsOfTheDay #IndianShoppers"
+            )
+        elif ch_lower in ("productthreads", "product_threads", "threads"):
+            # Threads conversational format with rich preview card
+            body = (
+                f"Amazon Price Drop Alert! 📉\n"
+                f"{short_title} is now down to {price}{mrp_note} ({discount_badge}).\n\n"
+                f"Grab the deal before it expires:\n"
+                f"{amazon_url}\n\n"
+                f"📌 Pinterest board: {pinterest_url}\n\n"
+                f"{hashtags} #ProductThreads #DealsIndia"
+            )
+        elif ch_lower in ("facebook_group", "group"):
+            body = (
+                f"🛍️ Amazon Affiliate Group Exclusive Deal!\n"
+                f"🔥 {short_title}\n"
+                f"💰 Offer Price: {price}{mrp_note} | {discount_badge}\n\n"
+                f"🛒 Amazon Link: {amazon_url}\n"
+                f"📌 Pinterest: {pinterest_url}\n"
+                f"🌐 More Deals: https://worldnewzs.in/amazon-products\n\n"
+                f"{hashtags} #AmazonAffiliateGroup"
+            )
+        else:  # WorldNewzs (Default Page)
+            body = (
+                f"🔥 [WORLDNEWZS DEAL ALERT] Major discount spotted on Amazon India!\n"
+                f"🏷️ {short_title}\n"
+                f"💰 Deal Price: {price}{mrp_note} | {discount_badge}\n\n"
                 f"🛒 Amazon Product Link: {amazon_url}\n"
                 f"📌 Pinterest Link: {pinterest_url}\n"
                 f"🌐 More Live Deals: https://worldnewzs.in/amazon-products\n\n"
-                f"{hashtags}"
-            ).strip()
+                f"{hashtags} #WorldNewzs #TechDealsIndia"
+            )
 
-            if ledger is None or ledger.is_description_unique(full_text):
-                return {
-                    "text": full_text,
-                    "patternId": pattern_id,
-                    "hashtags": hashtags,
-                    "category": category,
-                    "amazonUrl": amazon_url,
-                    "pinterestUrl": pinterest_url,
-                    "pinUrl": pinterest_url,
-                    "dealUrl": amazon_url,
-                }
-
-        rand_salt = f"#{random.randint(100, 999)}"
+        clean_text = body.strip()
         return {
-            "text": (
-                f"{random.choice(EMOJIS)} {short_title}\n"
-                f"💰 Deal Price: {price}{mrp_note} ({discount_badge}) {rand_salt}\n\n"
-                f"🛒 Amazon Product Link: {amazon_url}\n"
-                f"📌 Pinterest Link: {pinterest_url}\n"
-                f"🌐 More Live Deals: https://worldnewzs.in/amazon-products\n\n"
-                f"{cls.sample_hashtags(category)}"
-            ),
-            "patternId": 0,
-            "hashtags": cls.sample_hashtags(category),
+            "text": clean_text,
+            "channel": channel,
+            "hashtags": hashtags,
             "category": category,
             "amazonUrl": amazon_url,
             "pinterestUrl": pinterest_url,
             "pinUrl": pinterest_url,
             "dealUrl": amazon_url,
         }
+
+    @classmethod
+    def generate_post(cls, deal: Dict[str, Any], ledger: Optional[DeduplicationLedger] = None) -> Dict[str, Any]:
+        """Fallback to maintain 100% backward compatibility with existing workflows."""
+        return cls.generate_channel_post("WorldNewzs", deal, ledger)
 
 
 class QuickSocialPoster:

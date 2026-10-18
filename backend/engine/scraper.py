@@ -43,15 +43,18 @@ def sync_live_products() -> Dict[str, Any]:
             import time
             time.sleep(3)
 
-    if isinstance(live_prods, list) and len(live_prods) > 0:
         # Sanitize images and compute accurate discounts
         for p in live_prods:
-            asin = p.get("asin", "")
+            asin = str(p.get("asin") or "").strip()
             p["imageUrl"] = sanitize_image_url(p.get("imageUrl") or "", asin)
             price = p.get("price")
             orig = p.get("originalPrice")
             if price and orig and float(orig) > float(price):
                 p["discount"] = f"{round((1 - float(price) / float(orig)) * 100)}% OFF"
+            raw_url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+            if not raw_url or "tag=" not in raw_url or "amzn.to" in raw_url:
+                if asin and len(asin) == 10:
+                    p["productUrl"] = f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2&linkId=309384296fe1c1e72569a81c50402f7a&ref_=as_li_ss_tl"
 
         try:
             os.makedirs(os.path.dirname(LOCAL_DATASET_PATH), exist_ok=True)
@@ -180,7 +183,13 @@ def format_amazon_product_card(p: Dict[str, Any], idx: int = 0, page_number: int
         original_price_str = f"₹{int(orig_num):,}"
 
     asin = str(p.get("asin") or f"P{page_number}C{idx+1}").strip()
-    product_url = p.get("productUrl") or p.get("dealUrl") or f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
+    raw_url = str(p.get("productUrl") or p.get("dealUrl") or "").strip()
+    if raw_url and "tag=" in raw_url and not ("amzn.to" in raw_url and asin not in raw_url):
+        product_url = raw_url
+    elif asin and not asin.startswith("deal-") and not asin.startswith("P"):
+        product_url = f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2&linkId=309384296fe1c1e72569a81c50402f7a&ref_=as_li_ss_tl"
+    else:
+        product_url = raw_url or f"https://www.amazon.in/dp/{asin}?tag=ganeshd12-21&linkCode=ll2"
     raw_img = p.get("imageUrl") or f"https://m.media-amazon.com/images/P/{asin}.01._SCLZZZZZZZ_SX500_.jpg"
     image_url = sanitize_image_url(raw_img, asin)
 
@@ -441,7 +450,7 @@ def get_unposted_facebook_deals(
 
 def build_pinterest_share_url(deal: Dict[str, Any]) -> str:
     """Builds the Pinterest Pin Creation URL for an Amazon deal card."""
-    target_url = deal.get("dealUrl") or "https://worldnewzs.in/amazon-products"
+    target_url = deal.get("productUrl") or deal.get("dealUrl") or "https://worldnewzs.in/amazon-products"
     asin = deal.get("asin") or ""
     raw_media = deal.get("imageUrl") or ""
     media_url = sanitize_image_url(raw_media, asin)

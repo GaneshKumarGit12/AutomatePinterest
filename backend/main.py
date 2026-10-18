@@ -200,6 +200,7 @@ class PinterestFacebookShareRequest(BaseModel):
     targetBoardUrl: Optional[str] = None
     specificPinIds: Optional[List[str]] = None
     destination: Optional[str] = "both"  # "both", "page", "group"
+    destinations: Optional[List[str]] = None  # multi-channel destination list
     startPage: Optional[int] = 1
     endPage: Optional[int] = None
 
@@ -550,46 +551,16 @@ async def run_automation_worker(
                         "message": f"Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']} ({deal['price']})"
                     })
 
-                share_url = build_pinterest_share_url(deal)
+                    share_url = build_pinterest_share_url(deal)
 
-                def on_step(step_entry):
-                    _run_state["stepLogs"].append(step_entry)
-                    if len(_run_state["stepLogs"]) > 50:
-                        _run_state["stepLogs"] = _run_state["stepLogs"][-50:]
-                    broadcast_event("step_log", step_entry)
+                    def on_step(step_entry):
+                        _run_state["stepLogs"].append(step_entry)
+                        if len(_run_state["stepLogs"]) > 50:
+                            _run_state["stepLogs"] = _run_state["stepLogs"][-50:]
+                        broadcast_event("step_log", step_entry)
 
-                # Ensure browser context is healthy before execution
-                context = await get_healthy_context(context)
-
-                result = await execute_11_step_pipeline(
-                    context=context,
-                    deal=deal,
-                    share_url=share_url,
-                    collaborators=collaborators,
-                    on_step_callback=on_step,
-                )
-
-                # Auto-recovery & retry if card failed on first attempt
-                if not result.get("success"):
-                    err_low = str(result.get("error", "")).lower()
-                    if "closed" in err_low or "target page" in err_low:
-                        broadcast_event("log", {
-                            "level": "warn",
-                            "message": f"⚠️ Browser disconnected during Card [{card_idx+1}/{len(deals)}]. Reconnecting browser session and retrying card..."
-                        })
-                        try:
-                            await close_browser_context()
-                        except Exception:
-                            pass
-                        await asyncio.sleep(2)
-                        context = await get_browser_context()
-                    else:
-                        broadcast_event("log", {
-                            "level": "warn",
-                            "message": f"🔄 Retrying Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']}..."
-                        })
-                        await asyncio.sleep(1.5)
-                        context = await get_healthy_context(context)
+                    # Ensure browser context is healthy before execution
+                    context = await get_healthy_context(context)
 
                     result = await execute_11_step_pipeline(
                         context=context,
@@ -599,45 +570,75 @@ async def run_automation_worker(
                         on_step_callback=on_step,
                     )
 
-                # Clean card record without duplicate nested stepLogs to avoid memory explosion
-                card_record = {
-                    "id": deal.get("id"),
-                    "asin": deal.get("asin"),
-                    "title": deal.get("title"),
-                    "truncatedTitle": deal.get("truncatedTitle"),
-                    "price": deal.get("price"),
-                    "dealUrl": deal.get("dealUrl") or deal.get("productUrl"),
-                    "imageUrl": deal.get("imageUrl"),
-                    "shareUrl": share_url,
-                    "pageNumber": page_idx,
-                    "cardIndex": card_idx,
-                    "status": "success" if result.get("success") else "failed",
-                    "collaborators": result.get("collaborators") or collaborators,
-                    "error": result.get("error"),
-                }
-                _run_state["processedCards"].append(card_record)
-                all_cards_for_report.append(card_record)
-                _run_state["totalCardsProcessed"] += 1
+                    # Auto-recovery & retry if card failed on first attempt
+                    if not result.get("success"):
+                        err_low = str(result.get("error", "")).lower()
+                        if "closed" in err_low or "target page" in err_low:
+                            broadcast_event("log", {
+                                "level": "warn",
+                                "message": f"⚠️ Browser disconnected during Card [{card_idx+1}/{len(deals)}]. Reconnecting browser session and retrying card..."
+                            })
+                            try:
+                                await close_browser_context()
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2)
+                            context = await get_browser_context()
+                        else:
+                            broadcast_event("log", {
+                                "level": "warn",
+                                "message": f"🔄 Retrying Card [{card_idx+1}/{len(deals)}]: {deal['truncatedTitle']}..."
+                            })
+                            await asyncio.sleep(1.5)
+                            context = await get_healthy_context(context)
 
-                if result["success"]:
-                    pinterest_ledger.mark_pinned(deal)
-                    broadcast_event("deal_pinned", {
+                        result = await execute_11_step_pipeline(
+                            context=context,
+                            deal=deal,
+                            share_url=share_url,
+                            collaborators=collaborators,
+                            on_step_callback=on_step,
+                        )
+
+                    # Clean card record without duplicate nested stepLogs to avoid memory explosion
+                    card_record = {
+                        "id": deal.get("id"),
                         "asin": deal.get("asin"),
                         "title": deal.get("title"),
+                        "truncatedTitle": deal.get("truncatedTitle"),
+                        "price": deal.get("price"),
+                        "dealUrl": deal.get("dealUrl") or deal.get("productUrl"),
+                        "imageUrl": deal.get("imageUrl"),
+                        "shareUrl": share_url,
                         "pageNumber": page_idx,
                         "cardIndex": card_idx,
-                    })
-                    broadcast_event("log", {
-                        "level": "success",
-                        "message": f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED & MOVED TO PINTEREST: {deal['truncatedTitle']}"
-                    })
-                else:
-                    broadcast_event("log", {
-                        "level": "error",
-                        "message": f"❌ Card [{card_idx+1}/{len(deals)}] FAILED: {result.get('error', 'Unknown error')}"
-                    })
+                        "status": "success" if result.get("success") else "failed",
+                        "collaborators": result.get("collaborators") or collaborators,
+                        "error": result.get("error"),
+                    }
+                    _run_state["processedCards"].append(card_record)
+                    all_cards_for_report.append(card_record)
+                    _run_state["totalCardsProcessed"] += 1
 
-                await asyncio.sleep(1)
+                    if result["success"]:
+                        pinterest_ledger.mark_pinned(deal)
+                        broadcast_event("deal_pinned", {
+                            "asin": deal.get("asin"),
+                            "title": deal.get("title"),
+                            "pageNumber": page_idx,
+                            "cardIndex": card_idx,
+                        })
+                        broadcast_event("log", {
+                            "level": "success",
+                            "message": f"✅ Card [{card_idx+1}/{len(deals)}] COMPLETED & MOVED TO PINTEREST: {deal['truncatedTitle']}"
+                        })
+                    else:
+                        broadcast_event("log", {
+                            "level": "error",
+                            "message": f"❌ Card [{card_idx+1}/{len(deals)}] FAILED: {result.get('error', 'Unknown error')}"
+                        })
+
+                    await asyncio.sleep(1)
 
         # Generate dated PDF activity report
         duration_sec = int(time.time() - (_run_state["startTime"] or time.time()))
@@ -1487,6 +1488,43 @@ async def launch_edge_facebook():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/social/destinations")
+async def get_social_destinations():
+    """Returns available social destinations and active folder statuses."""
+    from backend.engine.social_manager import CHANNEL_DEFINITIONS, DESTINATIONS_DIR
+    res = []
+    for k, v in CHANNEL_DEFINITIONS.items():
+        folder = os.path.join(DESTINATIONS_DIR, v.get("folder", k))
+        res.append({
+            "key": k,
+            **v,
+            "folderExists": os.path.exists(folder),
+        })
+    return {"destinations": res}
+
+
+@app.post("/api/social/launch-channel-session")
+async def launch_channel_session(req: Dict[str, str]):
+    """Opens native browser with the specific channel's user-data directory for manual setup or verification."""
+    try:
+        channel = req.get("channel", "facebook_main")
+        from backend.engine.session_manager import get_session_dir, close_browser_context, kill_stale_automation_processes, clean_stale_lockfiles
+        from backend.engine.social_manager import CHANNEL_DEFINITIONS
+        await close_browser_context()
+        kill_stale_automation_processes()
+        sess_dir = get_session_dir(channel)
+        clean_stale_lockfiles(sess_dir)
+        target_url = CHANNEL_DEFINITIONS.get(channel, {}).get("url", "https://www.facebook.com/")
+        cmd = f'Start-Process msedge.exe -ArgumentList \'--user-data-dir="{sess_dir}"\', \'{target_url}\''
+        subprocess.Popen(["powershell", "-Command", cmd])
+        return {
+            "success": True,
+            "message": f"Browser opened with session for {channel}. Log in or verify on screen, then close the browser."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- Pinterest → Facebook Group Share Endpoints ---
 
 FB_STATE_FILE_PATH = (
@@ -1594,6 +1632,7 @@ async def run_pinterest_facebook_worker(
     target_board_url: Optional[str] = None,
     specific_pin_ids: Optional[List[str]] = None,
     destination: str = "both",
+    destinations: Optional[List[str]] = None,
     start_page: int = 1,
     end_page: Optional[int] = None,
 ):
@@ -1692,6 +1731,7 @@ async def run_pinterest_facebook_worker(
             target_board_url=target_board_url,
             specific_pin_ids=specific_pin_ids,
             destination=destination,
+            destinations=destinations,
             start_page=start_page,
             end_page=end_page,
             page_size=6,
@@ -1762,10 +1802,15 @@ async def start_pinterest_facebook_share(
         req.targetBoardUrl,
         req.specificPinIds,
         dest,
+        req.destinations,
         start_p,
         end_p,
     )
-    dest_name = "WorldNewzs Page & Amazon Affiliate Group" if dest == "both" else "WorldNewzs Facebook Page Feed" if dest == "page" else "Amazon Affiliate Group"
+    if req.destinations:
+        from backend.engine.social_manager import CHANNEL_DEFINITIONS
+        dest_name = ", ".join(CHANNEL_DEFINITIONS.get(d, {}).get("name", d) for d in req.destinations)
+    else:
+        dest_name = "WorldNewzs Page & Amazon Affiliate Group" if dest == "both" else "WorldNewzs Facebook Page Feed" if dest == "page" else "Amazon Affiliate Group"
     page_desc = f"Page {start_p} to {end_p}" if (end_p and end_p >= start_p) else f"{req.pinCount} product(s)"
     return {
         "success": True,
@@ -1774,6 +1819,7 @@ async def start_pinterest_facebook_share(
         "delaySeconds": req.delaySeconds,
         "targetBoardUrl": req.targetBoardUrl,
         "destination": dest,
+        "destinations": req.destinations,
         "startPage": start_p,
         "endPage": end_p,
     }
@@ -1818,6 +1864,9 @@ async def get_facebook_pins_endpoint(
         ledger=social_ledger,
         force_sync=forceRefresh,
     )
+    for deal in queue_data.get("deals", []):
+        d_asin = deal.get("asin") or deal.get("id") or ""
+        deal["postedChannels"] = social_ledger.get_asin_posted_channels(d_asin)
     return queue_data
 
 

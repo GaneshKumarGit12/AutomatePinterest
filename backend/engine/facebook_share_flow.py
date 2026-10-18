@@ -15,6 +15,7 @@ Automate Pinterest pin sharing to Facebook:
 
 import os
 import sys
+import re
 import json
 import asyncio
 import time
@@ -42,6 +43,8 @@ from backend.engine.social_manager import (
     DeduplicationLedger,
     ContentShuffler,
     QuickSocialPoster,
+    CHANNEL_DEFINITIONS,
+    DESTINATIONS_DIR,
 )
 from backend.engine.facebook_report_exporter import (
     export_facebook_shares_excel,
@@ -63,8 +66,13 @@ PINTEREST_CREATED_URL = os.environ.get("PINTEREST_CREATED_URL", "https://in.pint
 PINTEREST_SAVED_URL = os.environ.get("PINTEREST_SAVED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_saved/")
 FB_PAGE_NAME = os.environ.get("FACEBOOK_PAGE_NAME", "Worldnewzs")
 FB_PAGE_URL = os.environ.get("FACEBOOK_PAGE_URL", "https://www.facebook.com/profile.php?id=61589266599006")
+FB_PAGE_2_NAME = os.environ.get("FACEBOOK_PAGE_2_NAME", "LatestNews")
+FB_PAGE_2_URL = os.environ.get("FACEBOOK_PAGE_2_URL", "https://www.facebook.com/profile.php?id=61589391814601")
+FB_PROFILE_URL = os.environ.get("FACEBOOK_PROFILE_URL", "https://www.facebook.com/ganeshkumard56/")
 FB_GROUP_NAME = os.environ.get("FACEBOOK_GROUP_NAME", "Amazon Affiliate Group")
 FB_GROUP_URL = os.environ.get("FACEBOOK_GROUP_URL", "https://www.facebook.com/groups/1761596288324903/")
+INSTAGRAM_ACCOUNT = os.environ.get("INSTAGRAM_ACCOUNT", "@ganeshkumard12")
+THREADS_ACCOUNT = os.environ.get("THREADS_ACCOUNT", "@ganeshkumard12")
 DHANVI_PINS_CACHE = os.path.join(_WRITABLE_ROOT, "state", "dhanvi_pins_cache.json")
 TEMP_PIN_IMAGES_DIR = os.path.join(_WRITABLE_ROOT, "state", "temp_pin_images")
 SCREENSHOTS_DIR = os.path.join(_WRITABLE_ROOT, "state", "screenshots")
@@ -216,17 +224,23 @@ def _safe_print(msg: str):
 async def _take_screenshot(
     page: Page,
     name: str,
+    channel: Optional[str] = None,
     live_frame_fn: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Saves a screenshot to state/screenshots, updates fb_live_frame.png, and notifies live viewer."""
+    """Saves a screenshot to state/screenshots and optional channel folder, updates fb_live_frame.png, and notifies live viewer."""
     os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-    path = os.path.join(SCREENSHOTS_DIR, os.path.basename(name))
+    base_name = os.path.basename(name)
+    path = os.path.join(SCREENSHOTS_DIR, base_name)
     try:
         await page.screenshot(path=path, full_page=False)
         live_frame_path = os.path.join(SCREENSHOTS_DIR, "fb_live_frame.png")
         try:
             import shutil
             shutil.copy2(path, live_frame_path)
+            if channel:
+                ch_ss_dir = os.path.join(DESTINATIONS_DIR, channel, "screenshots")
+                os.makedirs(ch_ss_dir, exist_ok=True)
+                shutil.copy2(path, os.path.join(ch_ss_dir, base_name))
         except Exception:
             pass
         if live_frame_fn:
@@ -438,14 +452,15 @@ async def _ensure_facebook_session(
     return await _is_facebook_authenticated(page)
 
 
-async def _ensure_worldnewzs_profile(
+async def _ensure_facebook_page_profile(
     page: Page,
     fb_page_url: str = FB_PAGE_URL,
+    page_name: str = "WorldNewzs",
     log_fn: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
     """
-    Ensures the Facebook session is actively switched to the WorldNewzs Page profile
-    so posts into WorldNewzs Page feed and Amazon Affiliate Group are published as Page Admin.
+    Ensures the Facebook session is actively switched to the designated Page profile
+    so posts into that Page feed are published with Page Admin authority.
     """
     def _l(lvl: str, msg: str):
         if log_fn:
@@ -455,102 +470,255 @@ async def _ensure_worldnewzs_profile(
                 pass
         _safe_print(f"[Profile Switch] [{lvl.upper()}] {msg}")
 
+    # Build name variants (e.g. "LatestNews", "Latest News", "Latestnews")
+    name_variants = [page_name]
+    spaced_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', page_name).strip()
+    if spaced_name not in name_variants:
+        name_variants.append(spaced_name)
+    unspaced_name = page_name.replace(" ", "").strip()
+    if unspaced_name not in name_variants:
+        name_variants.append(unspaced_name)
+
     try:
-        _l("info", f"Checking Facebook identity status on '{fb_page_url}' (WorldNewzs)...")
+        _l("info", f"Checking Facebook identity status on '{fb_page_url}' ({page_name})...")
         await safe_goto(page, fb_page_url, timeout=45000, log_fn=_l)
         await asyncio.sleep(3.5)
 
-        # Clear any overlay or alertdialog
         try:
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
         except Exception:
             pass
 
-        # Check if already acting as WorldNewzs (Manage Page and no Switch Now banner)
-        is_managing = await page.evaluate("""() => {
+        # Check if the page displays an explicit switch banner or button targeting this page
+        needs_switch = await page.evaluate("""(variants) => {
             const body = document.body.innerText || '';
-            const hasManage = body.includes('Manage Page') || body.includes('Professional dashboard');
-            const hasSwitchNow = body.includes('Switch into WorldNewzs') || body.includes('Switch Now') || body.includes('Switch to WorldNewzs');
-            return hasManage && !hasSwitchNow;
+            for (const v of variants) {
+                if (body.includes(`Switch into ${v}`) || 
+                    body.includes(`Switch to ${v}`) || 
+                    body.includes(`Switch into this Page`) ||
+                    body.includes(`Switch into your Page`)) {
+                    return true;
+                }
+            }
+            // Check if there is an explicit Switch button in navigation/header
+            const buttons = Array.from(document.querySelectorAll('div[role="navigation"] div[role="button"], div[role="main"] div[role="button"], [role="button"]'));
+            const navSwitch = buttons.find(b => {
+                const txt = (b.innerText || '').trim();
+                const aria = b.getAttribute('aria-label') || '';
+                return txt === 'Switch' || txt === 'Switch Now' || aria === 'Switch' || aria.includes('Switch into');
+            });
+            if (navSwitch) {
+                return true;
+            }
+            return false;
+        }""", name_variants)
+
+        # Check if composer already visible on page ("What's on your mind?" or "Create a post")
+        has_composer = await page.evaluate("""() => {
+            const body = document.body.innerText || '';
+            return body.includes("What's on your mind?") || body.includes("Create a post");
         }""")
-        if is_managing:
-            _l("success", "✅ Facebook session is already acting as WorldNewzs (Page Admin)!")
+
+        if not needs_switch and has_composer:
+            _l("success", f"✅ Facebook session is already acting as {page_name} (Page Admin, composer ready)!")
             return True
 
-        # Look for "Switch Now" or "Switch" trigger on page
-        _l("info", "🔄 Switching profile to WorldNewzs Page identity...")
-        switch_trigger = await page.query_selector(
-            'div[role="button"]:has-text("Switch Now"), '
-            'div[aria-label="Switch Now"], '
-            'div[aria-label*="Switch into WorldNewzs" i], '
-            'div[role="button"]:has-text("Switch"), '
-            '[aria-label*="Switch to WorldNewzs" i]'
-        )
-        if switch_trigger:
-            _l("info", "🖱️ Clicking Switch into WorldNewzs trigger...")
-            try:
-                await switch_trigger.click()
-            except Exception:
-                await page.evaluate("""() => {
-                    const btn = Array.from(document.querySelectorAll('div[role="button"], span')).find(e => 
-                        (e.innerText || '').trim() === 'Switch Now' || (e.innerText || '').trim() === 'Switch'
-                    );
-                    if (btn) btn.click();
-                }""")
-            await asyncio.sleep(2.5)
+        # Need to switch profile!
+        _l("info", f"🔄 Switching profile to {page_name} Page identity...")
 
-            # Confirm Switch in modal dialog if prompted
-            modal_switch_btn = await page.query_selector(
+        # 1. First attempt: Direct Switch button on page banner/navigation
+        switch_clicked = False
+        direct_btn = page.locator(
+            'div[role="navigation"] div[role="button"]:has-text("Switch"), '
+            'div[role="navigation"] [aria-label="Switch"], '
+            'div[aria-label="Switch"][role="button"], '
+            'div[role="button"]:has-text("Switch Now"), '
+            'div[aria-label*="Switch into" i], '
+            'div[aria-label*="Switch to" i]'
+        ).first
+
+        if await direct_btn.count() > 0 and await direct_btn.is_visible():
+            _l("info", f"🖱️ Clicking on-page Switch trigger for {page_name}...")
+            try:
+                await direct_btn.scroll_into_view_if_needed()
+                await direct_btn.click(timeout=5000)
+                switch_clicked = True
+            except Exception as e:
+                _l("warning", f"Playwright click error on direct switch button, trying JS click: {e}")
+                switch_clicked = await page.evaluate("""() => {
+                    const btn = Array.from(document.querySelectorAll('div[role="button"], [aria-label="Switch"]')).find(e => {
+                        const t = (e.innerText || '').trim();
+                        const a = e.getAttribute('aria-label') || '';
+                        return t === 'Switch' || t === 'Switch Now' || a === 'Switch' || a.includes('Switch into');
+                    });
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }""")
+
+        # 2. Check for confirmation modal dialog
+        if switch_clicked:
+            await asyncio.sleep(2.5)
+            dialog_btn = page.locator(
                 'div[role="dialog"] div[role="button"]:has-text("Switch"), '
-                'div[role="dialog"] div[aria-label="Switch"][role="button"], '
-                'div[role="dialog"] div[aria-label="Switch"]'
-            )
-            if modal_switch_btn:
+                'div[role="dialog"] button:has-text("Switch"), '
+                'div[role="dialog"] [aria-label="Switch"][role="button"], '
+                'div[role="dialog"] [aria-label="Switch"]'
+            ).first
+            if await dialog_btn.count() > 0 and await dialog_btn.is_visible():
                 _l("info", "🖱️ Confirming Switch in dialog...")
                 try:
-                    await modal_switch_btn.click()
+                    await dialog_btn.click(timeout=5000)
                 except Exception:
                     await page.evaluate("""() => {
-                        const b = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"]')).find(el => (el.innerText || '').trim() === 'Switch');
+                        const b = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button')).find(el => (el.innerText || '').trim() === 'Switch');
                         if (b) b.click();
                     }""")
-                _l("info", "⏳ Waiting for Facebook profile switch...")
-                await asyncio.sleep(7)
+            _l("info", f"⏳ Waiting for {page_name} profile switch and page reload...")
+            await asyncio.sleep(7)
+            try:
                 await page.keyboard.press("Escape")
-                _l("success", "🎉 Successfully switched to WorldNewzs Page identity!")
-                return True
-        else:
-            profile_icon = await page.query_selector('div[aria-label="Your profile"]')
-            if profile_icon:
-                await profile_icon.click()
-                await asyncio.sleep(2)
-                wn_profile = await page.query_selector(
-                    'div[role="button"]:has-text("WorldNewzs"), '
-                    'div[role="listitem"]:has-text("WorldNewzs"), '
-                    '[aria-label*="WorldNewzs" i]'
-                )
-                if wn_profile:
-                    _l("info", "🖱️ Switching to WorldNewzs via profile dropdown...")
-                    await wn_profile.click()
-                    await asyncio.sleep(7)
-                    await page.keyboard.press("Escape")
-                    _l("success", "🎉 Successfully switched to WorldNewzs Page identity!")
-                    return True
+            except Exception:
+                pass
 
-        is_now_managing = await page.evaluate("""() => {
+        # 3. Fallback: Switch via top-right profile avatar menu
+        if not switch_clicked:
+            _l("info", f"🖱️ Attempting switch to {page_name} via top-right profile avatar...")
+            profile_icon = page.locator('div[aria-label="Your profile"]').first
+            if await profile_icon.count() > 0 and await profile_icon.is_visible():
+                await profile_icon.click(timeout=5000)
+                await asyncio.sleep(2)
+
+                # Check for "See all profiles" button in menu
+                see_all = page.locator('div[role="button"]:has-text("See all profiles"), span:has-text("See all profiles")').first
+                if await see_all.count() > 0 and await see_all.is_visible():
+                    _l("info", "🖱️ Clicking 'See all profiles' in menu...")
+                    await see_all.click(timeout=4000)
+                    await asyncio.sleep(2)
+
+                # Look for target page tile among variants
+                target_found = False
+                for variant in name_variants:
+                    page_tile = page.locator(
+                        f'div[role="button"]:has-text("{variant}"), '
+                        f'div[role="listitem"]:has-text("{variant}"), '
+                        f'[aria-label*="{variant}" i]'
+                    ).first
+                    if await page_tile.count() > 0 and await page_tile.is_visible():
+                        _l("info", f"🖱️ Selected profile tile '{variant}'...")
+                        await page_tile.click(timeout=5000)
+                        target_found = True
+                        break
+
+                if target_found:
+                    _l("info", f"⏳ Waiting for profile switch to {page_name}...")
+                    await asyncio.sleep(7)
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+        # Verification check: Check if composer or admin tools now visible
+        await asyncio.sleep(2)
+        verified = await page.evaluate("""(variants) => {
             const body = document.body.innerText || '';
-            return body.includes('Manage Page') || body.includes('Professional dashboard');
-        }""")
-        if is_now_managing:
-            _l("success", "✅ Verified: Now acting as WorldNewzs (Page Admin) on Facebook!")
+            const hasComposer = body.includes("What's on your mind?") || body.includes("Create a post");
+            const hasSwitchBanner = variants.some(v => 
+                body.includes(`Switch into ${v}`) || 
+                body.includes(`Switch to ${v}`)
+            );
+            return hasComposer && !hasSwitchBanner;
+        }""", name_variants)
+        if verified:
+            _l("success", f"🎉 Successfully verified {page_name} Page profile is active!")
             return True
 
-        _l("warning", "⚠️ Continuing with active Facebook profile.")
+        secondary_verified = await page.evaluate("""(variants) => {
+            const body = document.body.innerText || '';
+            const hasManage = body.includes("Manage Page") || body.includes("Professional dashboard");
+            const hasSwitchBanner = variants.some(v => 
+                body.includes(`Switch into ${v}`) || 
+                body.includes(`Switch to ${v}`)
+            );
+            return hasManage && !hasSwitchBanner;
+        }""", name_variants)
+        if secondary_verified:
+            _l("success", f"✅ Verified: Now acting as {page_name} (Page Admin) on Facebook!")
+            return True
+
+        _l("warning", f"⚠️ Continuing with current profile state for {page_name}...")
         return False
     except Exception as e:
         _l("warning", f"Profile switch note: {e}")
         return False
+
+
+async def _ensure_worldnewzs_profile(
+    page: Page,
+    fb_page_url: str = FB_PAGE_URL,
+    log_fn: Optional[Callable[[str, str], None]] = None,
+) -> bool:
+    """Wrapper ensuring WorldNewzs Page profile for backward compatibility."""
+    return await _ensure_facebook_page_profile(page, fb_page_url=fb_page_url, page_name=FB_PAGE_NAME, log_fn=log_fn)
+
+
+async def _ensure_personal_profile(
+    page: Page,
+    log_fn: Optional[Callable[[str, str], None]] = None,
+) -> bool:
+    """Ensures Facebook is switched to the personal profile (ganeshkumard56) rather than a Page."""
+    def _l(lvl: str, msg: str):
+        if log_fn:
+            try:
+                log_fn(lvl, msg)
+            except Exception:
+                pass
+        _safe_print(f"[Personal Profile Switch] [{lvl.upper()}] {msg}")
+
+    try:
+        is_page = await page.evaluate("""() => {
+            const body = document.body.innerText || '';
+            return body.includes('Manage Page') || body.includes('Professional dashboard');
+        }""")
+        if not is_page:
+            _l("success", "✅ Already acting as personal profile on Facebook.")
+            return True
+
+        _l("info", "🔄 Switching from Page identity back to Personal Profile (Ganesh Kumar)...")
+        profile_icon = page.locator('div[aria-label="Your profile"]').first
+        if await profile_icon.count() > 0 and await profile_icon.is_visible():
+            await profile_icon.click(timeout=4000)
+            await asyncio.sleep(2)
+            personal_tile = page.locator(
+                'div[role="button"]:has-text("Ganesh Kumar"), '
+                'div[role="listitem"]:has-text("Ganesh Kumar"), '
+                '[aria-label*="Ganesh Kumar" i]'
+            ).first
+            if await personal_tile.count() > 0 and await personal_tile.is_visible():
+                await personal_tile.click(timeout=5000)
+                await asyncio.sleep(6)
+            else:
+                see_all = page.locator('div[role="button"]:has-text("See all profiles"), span:has-text("See all profiles")').first
+                if await see_all.count() > 0 and await see_all.is_visible():
+                    await see_all.click(timeout=4000)
+                    await asyncio.sleep(2)
+                    personal_tile2 = page.locator(
+                        'div[role="button"]:has-text("Ganesh Kumar"), '
+                        'div[role="listitem"]:has-text("Ganesh Kumar"), '
+                        '[aria-label*="Ganesh Kumar" i]'
+                    ).first
+                    if await personal_tile2.count() > 0 and await personal_tile2.is_visible():
+                        await personal_tile2.click(timeout=5000)
+                        await asyncio.sleep(6)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            _l("success", "🎉 Successfully switched to Personal Profile!")
+            return True
+    except Exception as e:
+        _l("warning", f"Personal profile switch note: {e}")
+    return False
 
 
 async def _publish_to_facebook_page(
@@ -559,11 +727,14 @@ async def _publish_to_facebook_page(
     pin_id: str,
     pin_url: str = "",
     image_path: Optional[str] = None,
+    channel_key: str = "WorldNewzs",
+    page_url: str = FB_PAGE_URL,
+    page_name: str = FB_PAGE_NAME,
     log_fn: Optional[Callable[[str, str], None]] = None,
     live_frame_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Publishes deal copy and Pinterest pin link directly to WorldNewzs Facebook Page feed.
+    Publishes deal copy and product image directly to the specified Facebook Page feed (WorldNewzs or LatestNews).
     """
     def _l(lvl: str, msg: str):
         if log_fn:
@@ -571,36 +742,16 @@ async def _publish_to_facebook_page(
                 log_fn(lvl, msg)
             except Exception:
                 pass
-        _safe_print(f"[FB Page Publish] [{lvl.upper()}] {msg}")
+        _safe_print(f"[{page_name} Publish] [{lvl.upper()}] {msg}")
 
-    _l("info", f"📄 Navigating to WorldNewzs Facebook Page ({FB_PAGE_URL})...")
-    await safe_goto(page, FB_PAGE_URL, timeout=45000, log_fn=_l)
+    _l("info", f"📄 Navigating to {page_name} Facebook Page ({page_url})...")
+    await safe_goto(page, page_url, timeout=45000, log_fn=_l)
     await page.bring_to_front()
     await asyncio.sleep(3)
 
-    # Check if Switch Now prompt appears
-    try:
-        switch_now_btn = page.locator(
-            'div[role="button"]:has-text("Switch Now"), '
-            'div[aria-label="Switch Now"], '
-            'div[role="button"]:has-text("Switch"), '
-            '[aria-label*="Switch into WorldNewzs" i]'
-        ).first
-        if await switch_now_btn.count() > 0 and await switch_now_btn.is_visible():
-            _l("info", "🔄 Switching into WorldNewzs Page profile...")
-            await switch_now_btn.click()
-            await asyncio.sleep(2.5)
-            dialog_switch = page.locator(
-                'div[role="dialog"] div[role="button"]:has-text("Switch"), '
-                'div[role="dialog"] div[aria-label="Switch"]'
-            ).first
-            if await dialog_switch.count() > 0 and await dialog_switch.is_visible():
-                await dialog_switch.click()
-                await asyncio.sleep(6)
-    except Exception:
-        pass
+    # Ensure profile identity is switched to this page
+    await _ensure_facebook_page_profile(page, fb_page_url=page_url, page_name=page_name, log_fn=_l)
 
-    # Dismiss any notification alertdialog or overlay
     try:
         await page.keyboard.press("Escape")
         await asyncio.sleep(1)
@@ -611,25 +762,52 @@ async def _publish_to_facebook_page(
     await page.evaluate("window.scrollBy(0, 350)")
     await asyncio.sleep(1.5)
 
-    # Locate and trigger composer: "What's on your mind?"
-    _l("info", "📝 Opening post composer on WorldNewzs Page ('What\\'s on your mind?')...")
-    composer_trigger = page.locator(
+    # Locate and trigger composer: "What's on your mind?", "Create a post", or "Write something..."
+    _l("info", f"📝 Opening post composer on {page_name} Page...")
+    composer_selector = (
         'div[role="button"]:has-text("What\'s on your mind?"), '
-        'span:has-text("What\'s on your mind?")'
-    ).first
-    await composer_trigger.wait_for(state="visible", timeout=12000)
+        'span:has-text("What\'s on your mind?"), '
+        'div[role="button"]:has-text("Create a post"), '
+        'span:has-text("Create a post"), '
+        'div[role="button"]:has-text("Write something..."), '
+        'span:has-text("Write something...")'
+    )
+    composer_trigger = page.locator(composer_selector).first
+
+    composer_found = False
+    for attempt in range(3):
+        if await composer_trigger.count() > 0 and await composer_trigger.is_visible():
+            composer_found = True
+            break
+        await page.evaluate("window.scrollBy(0, 350)")
+        await asyncio.sleep(1.5)
+
+    if not composer_found:
+        try:
+            await composer_trigger.wait_for(state="visible", timeout=8000)
+            composer_found = True
+        except Exception:
+            debug_path = os.path.join(DESTINATIONS_DIR, channel_key, "screenshots", "debug_composer_missing.png")
+            try:
+                os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+                await page.screenshot(path=debug_path)
+                _l("warning", f"Composer missing, saved debug screenshot to {debug_path}")
+            except Exception:
+                pass
+            raise RuntimeError(f"Could not find post composer on {page_name} Page.")
+
     try:
         await composer_trigger.click(timeout=4000, force=True)
     except Exception:
         await page.evaluate("""() => {
-            const el = Array.from(document.querySelectorAll('div[role="button"], span')).find(e => 
-                (e.innerText || '').includes("What's on your mind?")
-            );
+            const el = Array.from(document.querySelectorAll('div[role="button"], span')).find(e => {
+                const t = (e.innerText || '');
+                return t.includes("What's on your mind?") || t.includes("Create a post") || t.includes("Write something...");
+            });
             if (el) el.click();
         }""")
     await asyncio.sleep(3)
 
-    # Scoped Create post dialog
     dialog_loc = page.locator(
         'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]), '
         'div[role="dialog"]:has-text("Create post"), '
@@ -637,7 +815,6 @@ async def _publish_to_facebook_page(
     ).first
     await dialog_loc.wait_for(state="visible", timeout=12000)
 
-    # Focus textbox and type copy
     textbox = page.locator(
         'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]) div[role="textbox"][contenteditable="true"], '
         'div[role="dialog"]:has-text("Create post") div[role="textbox"][contenteditable="true"], '
@@ -648,30 +825,26 @@ async def _publish_to_facebook_page(
         await textbox.click(timeout=3000, force=True)
     except Exception:
         await page.evaluate("""() => {
-            const d = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
-                      document.querySelector('div[role="dialog"]:has-text("Create post")') || 
-                      document.querySelector('div[role="dialog"]');
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            const d = dialogs.find(el => (el.innerText || '').includes('Create post') || el.querySelector('div[role="textbox"][contenteditable="true"]')) || dialogs[0];
             const tb = d ? d.querySelector('div[role="textbox"][contenteditable="true"]') : null;
             if (tb) { tb.focus(); tb.click(); }
         }""")
     await asyncio.sleep(0.5)
 
     clean_text = post_text.replace("\r", "")
-    _l("info", f"⌨️ Typing deal copy & Pinterest link for Pin {pin_id} into Page composer...")
+    _l("info", f"⌨️ Typing deal copy for Pin {pin_id} into {page_name} composer...")
     await page.keyboard.type(clean_text, delay=14)
     await asyncio.sleep(1)
-    # Dismiss any hashtag dropdown suggestion popup
     try:
         await page.keyboard.press("Escape")
     except Exception:
         pass
 
-    # ──────────────────────────────────────────
-    # CHECKPOINT: Attach Verified Image to Page Post
-    # ──────────────────────────────────────────
+    # Attach Verified Image
     attached_image_verified = False
     if image_path and os.path.exists(image_path):
-        _l("info", f"📸 [Checkpoint] Attaching verified image ({os.path.getsize(image_path)} bytes) to Page composer...")
+        _l("info", f"📸 Attaching verified image ({os.path.getsize(image_path)} bytes) to {page_name} composer...")
         try:
             file_input = dialog_loc.locator('input[type="file"][accept*="image"], input[type="file"]').first
             if await file_input.count() == 0:
@@ -689,8 +862,7 @@ async def _publish_to_facebook_page(
 
             if await file_input.count() > 0:
                 await file_input.set_input_files(image_path)
-                _l("info", "⏳ Image file injected into Page composer. Awaiting photo preview hydration...")
-
+                _l("info", f"⏳ Image file injected into {page_name} composer. Awaiting photo preview...")
                 for _ in range(10):
                     preview_img = dialog_loc.locator(
                         'img[src*="blob:"], '
@@ -702,22 +874,15 @@ async def _publish_to_facebook_page(
                         attached_image_verified = True
                         break
                     await asyncio.sleep(1)
-
-                if attached_image_verified:
-                    _l("success", f"📸 [Checkpoint Passed] Pin {pin_id} image verified & attached in Facebook Page composer!")
-                else:
-                    _l("warning", f"⚠️ Image uploaded to Page composer; continuing with upload intact.")
-                    attached_image_verified = True
-            else:
-                _l("warning", "⚠️ Could not locate Photo/video file input in Page composer; relying on link preview.")
+                _l("success", f"📸 [Checkpoint Passed] Pin {pin_id} image verified & attached in {page_name} composer!")
         except Exception as img_err:
-            _l("warning", f"⚠️ Error attaching image file to Page composer: {img_err}")
+            _l("warning", f"⚠️ Error attaching image file to {page_name} composer: {img_err}")
 
-    # Checkpoint screenshot showing composer with verified image
-    await _take_screenshot(page, f"fb_page_checkpoint_verified_pin_{pin_id}.png", live_frame_fn=live_frame_fn)
-    await asyncio.sleep(3)
+    checkpoint_name = f"fb_{channel_key.lower()}_checkpoint_pin_{pin_id}.png"
+    await _take_screenshot(page, checkpoint_name, channel=channel_key, live_frame_fn=live_frame_fn)
+    await asyncio.sleep(2.5)
 
-    # Click Next button
+    # Click Next button if present
     _l("info", "🖱️ Advancing from Create post to Post settings (Next)...")
     await page.evaluate("""() => {
         const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
@@ -728,10 +893,191 @@ async def _publish_to_facebook_page(
             if (nextBtn) nextBtn.click();
         }
     }""")
+    await asyncio.sleep(2.5)
+
+    # Handle any upsell/prompt dialogs (e.g. "Speak With People Directly", "Get Messages", "Not now")
+    for _ in range(3):
+        prompt_handled = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const d of dialogs) {
+                const text = d.innerText || '';
+                if (text.includes('Speak With People Directly') || text.includes('Not now') || text.includes('Get Messages') || text.includes('Call Now')) {
+                    const btns = Array.from(d.querySelectorAll('div[role="button"], button'));
+                    const notNow = btns.find(b => (b.innerText || '').trim() === 'Not now' || b.getAttribute('aria-label') === 'Not now');
+                    if (notNow) {
+                        notNow.click();
+                        return true;
+                    }
+                    const closeBtn = btns.find(b => b.getAttribute('aria-label') === 'Close');
+                    if (closeBtn) {
+                        closeBtn.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""")
+        if prompt_handled:
+            _l("info", "🖱️ Dismissed Facebook promotional / 'Not now' prompt dialog...")
+            await asyncio.sleep(2)
+        else:
+            break
+
+    # Click Post button
+    _l("info", f"🚀 Publishing Pin {pin_id} to {page_name} Facebook Page feed...")
+    clicked_post = False
+    for attempt in range(6):
+        # Also check and dismiss any lingering "Not now" modal
+        await page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('div[role="button"], button'));
+            const notNow = btns.find(b => (b.innerText || '').trim() === 'Not now' || b.getAttribute('aria-label') === 'Not now');
+            if (notNow) notNow.click();
+        }""")
+        await asyncio.sleep(1)
+
+        clicked_post = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const dialog of dialogs) {
+                const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
+                const postBtn = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
+                if (postBtn && postBtn.getAttribute('aria-disabled') !== 'true') {
+                    postBtn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if clicked_post:
+            _l("success", f"🖱️ Clicked 'Post' button successfully on attempt {attempt + 1}!")
+            break
+        await asyncio.sleep(1.5)
+
+    if not clicked_post:
+        post_loc = page.locator('div[role="dialog"]:has-text("Post settings") div[role="button"]:has-text("Post"), div[role="dialog"]:has-text("Create post") div[role="button"]:has-text("Post"), [role="button"]:has-text("Post")').first
+        if await post_loc.count() > 0:
+            await post_loc.click(timeout=4000, force=True)
+
+    _l("info", f"⏳ Awaiting post publication confirmation on {page_name}...")
+    # Handle any post-publication popup like "Boost post"
+    for _ in range(8):
+        await asyncio.sleep(1.5)
+        boost_dismissed = await page.evaluate("""() => {
+            const btns = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button'));
+            const notNow = btns.find(b => (b.innerText || '').trim() === 'Not now' || b.getAttribute('aria-label') === 'Close');
+            if (notNow) { notNow.click(); return true; }
+            return false;
+        }""")
+        if boost_dismissed:
+            _l("info", "🖱️ Dismissed post-publish dialog ('Not now')...")
+
+    try:
+        await page.locator('div[role="dialog"]:has-text("Create post"), div[role="dialog"]:has-text("Post settings")').first.wait_for(state="hidden", timeout=12000)
+    except Exception:
+        pass
+
+    await asyncio.sleep(2)
+    proof_name = f"verified_{channel_key.lower()}_pin_{pin_id}.png"
+    verified_path = await _take_screenshot(page, proof_name, channel=channel_key, live_frame_fn=live_frame_fn)
+    _l("success", f"🎉 Successfully published Pin {pin_id} to {page_name} Facebook Page! (Proof: {verified_path})")
+    return {"success": True, "screenshotPath": verified_path}
+
+
+async def _publish_to_facebook_profile(
+    page: Page,
+    post_text: str,
+    pin_id: str,
+    pin_url: str = "",
+    image_path: Optional[str] = None,
+    log_fn: Optional[Callable[[str, str], None]] = None,
+    live_frame_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Publishes personal recommendation deal copy & link directly to Facebook Main profile feed (ganeshkumard56).
+    """
+    channel_key = "Facebook_Main"
+    def _l(lvl: str, msg: str):
+        if log_fn:
+            try:
+                log_fn(lvl, msg)
+            except Exception:
+                pass
+        _safe_print(f"[FB Main Profile] [{lvl.upper()}] {msg}")
+
+    _l("info", f"👤 Navigating to Facebook Home Feed for Personal Profile ({FB_PROFILE_URL})...")
+    await safe_goto(page, "https://www.facebook.com/", timeout=45000, log_fn=_l)
+    await page.bring_to_front()
     await asyncio.sleep(3)
 
-    # Click Post button with exact match
-    _l("info", f"🚀 Publishing Pin {pin_id} to WorldNewzs Facebook Page feed...")
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    # Ensure profile identity is personal
+    await _ensure_personal_profile(page, log_fn=_l)
+
+    # Scroll down so composer is centered in viewport
+    await page.evaluate("window.scrollBy(0, 300)")
+    await asyncio.sleep(1.5)
+
+    _l("info", "📝 Opening post composer on Personal Profile ('What\\'s on your mind?')...")
+    trigger_clicked = await page.evaluate("""() => {
+        const triggers = Array.from(document.querySelectorAll('div[role="button"], span'));
+        const trigger = triggers.find(t => {
+            const txt = (t.innerText || '').trim();
+            return txt.includes("What's on your mind") || txt.includes("Create post");
+        });
+        if (trigger) {
+            trigger.scrollIntoView({ block: 'center', behavior: 'instant' });
+            const btn = trigger.closest('div[role="button"]') || trigger;
+            btn.click();
+            return true;
+        }
+        return false;
+    }""")
+    if not trigger_clicked:
+        composer_trigger = page.locator('div[role="button"]:has-text("What\'s on your mind"), span:has-text("What\'s on your mind")').first
+        if await composer_trigger.count() > 0:
+            await composer_trigger.click(timeout=5000, force=True)
+
+    await asyncio.sleep(3)
+
+    dialog_loc = page.locator('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]), div[role="dialog"]:has-text("Create post")').first
+    await dialog_loc.wait_for(state="visible", timeout=12000)
+
+    textbox = page.locator('div[role="dialog"] div[role="textbox"][contenteditable="true"]').first
+    await textbox.wait_for(state="visible", timeout=8000)
+    await textbox.click(timeout=3000, force=True)
+    await asyncio.sleep(0.5)
+
+    clean_text = post_text.replace("\r", "")
+    _l("info", f"⌨️ Typing personal deal recommendation for Pin {pin_id}...")
+    await page.keyboard.type(clean_text, delay=12)
+    await asyncio.sleep(1)
+
+    # Attach verified image
+    if image_path and os.path.exists(image_path):
+        _l("info", f"📸 Attaching verified product image to Personal Profile post...")
+        try:
+            file_input = dialog_loc.locator('input[type="file"][accept*="image"], input[type="file"]').first
+            if await file_input.count() == 0:
+                photo_btn = dialog_loc.locator('div[aria-label*="Photo" i], div[role="button"]:has-text("Photo")').first
+                if await photo_btn.count() > 0:
+                    await photo_btn.click()
+                    await asyncio.sleep(1)
+                    file_input = dialog_loc.locator('input[type="file"]').first
+            if await file_input.count() > 0:
+                await file_input.set_input_files(image_path)
+                await asyncio.sleep(3)
+        except Exception as e_img:
+            _l("warning", f"Image attachment note: {e_img}")
+
+    checkpoint_name = f"fb_main_checkpoint_pin_{pin_id}.png"
+    await _take_screenshot(page, checkpoint_name, channel=channel_key, live_frame_fn=live_frame_fn)
+    await asyncio.sleep(2)
+
+    _l("info", "🚀 Publishing deal to Facebook Main feed...")
     clicked_post = await page.evaluate("""() => {
         const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
         for (const dialog of dialogs) {
@@ -744,25 +1090,251 @@ async def _publish_to_facebook_page(
         }
         return false;
     }""")
-
     if not clicked_post:
-        post_loc = page.locator('div[role="dialog"]:has-text("Post settings") div[role="button"]:has-text("Post"), div[role="dialog"]:has-text("Create post") div[role="button"]:has-text("Post")').first
-        if await post_loc.count() > 0:
-            await post_loc.click()
+        post_loc = page.locator('div[role="dialog"] div[role="button"]:has-text("Post"), div[role="dialog"] button:has-text("Post")').first
+        await post_loc.click(timeout=6000, force=True)
 
-    _l("info", "⏳ Awaiting post publication confirmation on WorldNewzs Page...")
+    _l("info", "⏳ Awaiting post publication confirmation on Personal Profile...")
     await asyncio.sleep(8)
-
-    # Wait for modal to detach
     try:
         await page.locator('div[role="dialog"]:has-text("Create post")').first.wait_for(state="hidden", timeout=15000)
     except Exception:
         pass
 
-    await asyncio.sleep(2)
-    verified_path = await _take_screenshot(page, f"verified_fb_page_pin_{pin_id}.png", live_frame_fn=live_frame_fn)
-    _l("success", f"🎉 Successfully published Pin {pin_id} to WorldNewzs Facebook Page! (Proof: {verified_path})")
+    proof_name = f"verified_fb_main_pin_{pin_id}.png"
+    verified_path = await _take_screenshot(page, proof_name, channel=channel_key, live_frame_fn=live_frame_fn)
+    _l("success", f"🎉 Successfully published Pin {pin_id} to Facebook Main personal feed! (Proof: {verified_path})")
     return {"success": True, "screenshotPath": verified_path}
+
+
+async def _publish_to_instagram(
+    post_text: str,
+    pin_id: str,
+    pin_url: str = "",
+    image_path: Optional[str] = None,
+    log_fn: Optional[Callable[[str, str], None]] = None,
+    live_frame_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Publishes high-res product photo and aesthetic bio CTA caption to Instagram (@ganeshkumard12).
+    Uses isolated persistent browser context in user_data/sessions/product_insta.
+    """
+    channel_key = "ProductInsta"
+    def _l(lvl: str, msg: str):
+        if log_fn:
+            try:
+                log_fn(lvl, msg)
+            except Exception:
+                pass
+        _safe_print(f"[Instagram] [{lvl.upper()}] {msg}")
+
+    if not image_path or not os.path.exists(image_path):
+        _l("warning", f"⚠️ Instagram post requires a valid image. Skipping ASIN {pin_id}.")
+        return {"success": False, "error": "No verified image file for Instagram"}
+
+    _l("info", f"📸 Step: Launching isolated session for Instagram ({INSTAGRAM_ACCOUNT})...")
+    context = await get_browser_context("product_insta")
+    page = await context.new_page()
+    try:
+        await install_visual_cursor(page)
+        _l("info", "🔗 Navigating to https://www.instagram.com/...")
+        await safe_goto(page, "https://www.instagram.com/", timeout=45000, log_fn=_l)
+        await page.bring_to_front()
+        await asyncio.sleep(3.5)
+
+        # Dismiss "Not Now" dialogs
+        for _ in range(2):
+            try:
+                not_now_btn = page.locator('button:has-text("Not Now"), div[role="button"]:has-text("Not Now")').first
+                if await not_now_btn.count() > 0 and await not_now_btn.is_visible():
+                    await not_now_btn.click()
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+        # Locate "Create" (+) navigation item
+        _l("info", "🔍 Locating Instagram 'Create' (+) navigation button...")
+        create_btn = page.locator(
+            'svg[aria-label="New post"], '
+            'svg[aria-label="Create"], '
+            'a[href="#"]:has-text("Create"), '
+            'div[role="button"]:has-text("Create"), '
+            'span:has-text("Create")'
+        ).first
+        await create_btn.wait_for(state="visible", timeout=12000)
+        await create_btn.click(timeout=5000, force=True)
+        await asyncio.sleep(2.5)
+
+        # Attach image to file input
+        _l("info", f"📤 Uploading product image ({os.path.basename(image_path)}) to Instagram composer...")
+        file_input = page.locator('div[role="dialog"] input[type="file"], input[type="file"]').first
+        await file_input.wait_for(state="attached", timeout=10000)
+        await file_input.set_input_files(image_path)
+        await asyncio.sleep(3)
+
+        # Click "Next" on Crop Screen
+        _l("info", "🖱️ Advancing crop modal (Next)...")
+        next_btn = page.locator('div[role="dialog"] div[role="button"]:has-text("Next"), div[role="dialog"] button:has-text("Next")').first
+        await next_btn.wait_for(state="visible", timeout=10000)
+        await next_btn.click()
+        await asyncio.sleep(2)
+
+        # Click "Next" on Filter Screen
+        _l("info", "🖱️ Advancing filter modal (Next)...")
+        next_btn_2 = page.locator('div[role="dialog"] div[role="button"]:has-text("Next"), div[role="dialog"] button:has-text("Next")').first
+        if await next_btn_2.count() > 0 and await next_btn_2.is_visible():
+            await next_btn_2.click()
+            await asyncio.sleep(2)
+
+        # Focus Caption Textbox and type Instagram copy
+        _l("info", f"⌨️ Typing aesthetic Instagram caption with bio CTA for ASIN {pin_id}...")
+        caption_box = page.locator(
+            'div[role="dialog"] div[aria-label*="Write a caption" i], '
+            'div[role="dialog"] div[role="textbox"]'
+        ).first
+        await caption_box.wait_for(state="visible", timeout=10000)
+        await caption_box.click(timeout=3000, force=True)
+        await asyncio.sleep(0.5)
+
+        clean_text = post_text.replace("\r", "")
+        await page.keyboard.type(clean_text, delay=10)
+        await asyncio.sleep(1.5)
+
+        # Checkpoint screenshot
+        checkpoint_name = f"ig_checkpoint_pin_{pin_id}.png"
+        await _take_screenshot(page, checkpoint_name, channel=channel_key, live_frame_fn=live_frame_fn)
+
+        # Click "Share" button
+        _l("info", "🚀 Clicking 'Share' button to publish to Instagram feed...")
+        share_btn = page.locator('div[role="dialog"] div[role="button"]:has-text("Share"), div[role="dialog"] button:has-text("Share")').first
+        await share_btn.wait_for(state="visible", timeout=10000)
+        await share_btn.click(timeout=5000, force=True)
+
+        _l("info", "⏳ Awaiting Instagram publication confirmation...")
+        for _ in range(15):
+            is_done = await page.evaluate("""() => {
+                const body = document.body.innerText || '';
+                return body.includes('Your post has been shared') || body.includes('Post shared');
+            }""")
+            if is_done:
+                break
+            await asyncio.sleep(1)
+
+        await asyncio.sleep(2)
+        proof_name = f"verified_ig_pin_{pin_id}.png"
+        verified_path = await _take_screenshot(page, proof_name, channel=channel_key, live_frame_fn=live_frame_fn)
+        _l("success", f"🎉 Successfully published Pin {pin_id} to Instagram feed ({INSTAGRAM_ACCOUNT})! (Proof: {verified_path})")
+        return {"success": True, "screenshotPath": verified_path}
+    except Exception as e_ig:
+        _l("error", f"Instagram posting note: {e_ig}")
+        raise e_ig
+    finally:
+        if not page.is_closed():
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+async def _publish_to_threads(
+    post_text: str,
+    pin_id: str,
+    pin_url: str = "",
+    image_path: Optional[str] = None,
+    log_fn: Optional[Callable[[str, str], None]] = None,
+    live_frame_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Publishes conversational deal post with rich clickable Amazon link card to Threads (@ganeshkumard12).
+    Uses isolated persistent browser context in user_data/sessions/product_threads.
+    """
+    channel_key = "ProductThreads"
+    def _l(lvl: str, msg: str):
+        if log_fn:
+            try:
+                log_fn(lvl, msg)
+            except Exception:
+                pass
+        _safe_print(f"[Threads] [{lvl.upper()}] {msg}")
+
+    _l("info", f"🧵 Step: Launching isolated session for Threads ({THREADS_ACCOUNT})...")
+    context = await get_browser_context("product_threads")
+    page = await context.new_page()
+    try:
+        await install_visual_cursor(page)
+        _l("info", "🔗 Navigating to https://www.threads.net/...")
+        await safe_goto(page, "https://www.threads.net/", timeout=45000, log_fn=_l)
+        await page.bring_to_front()
+        await asyncio.sleep(3.5)
+
+        # Open Threads Composer
+        _l("info", "📝 Opening Threads composer ('Start a thread...')...")
+        composer_trigger = page.locator(
+            'div[role="button"]:has-text("Start a thread"), '
+            'span:has-text("Start a thread"), '
+            'svg[aria-label="Create"], '
+            'svg[aria-label="Compose"], '
+            'div[aria-label="Create a thread"]'
+        ).first
+        if await composer_trigger.count() > 0:
+            await composer_trigger.click(timeout=5000, force=True)
+            await asyncio.sleep(2)
+
+        # Locate contenteditable textbox
+        textbox = page.locator(
+            'div[role="dialog"] div[role="textbox"][contenteditable="true"], '
+            'div[role="textbox"][contenteditable="true"]'
+        ).first
+        await textbox.wait_for(state="visible", timeout=10000)
+        await textbox.click(timeout=3000, force=True)
+        await asyncio.sleep(0.5)
+
+        clean_text = post_text.replace("\r", "")
+        _l("info", f"⌨️ Entering Threads deal copy & direct Amazon link for ASIN {pin_id}...")
+        await page.keyboard.type(clean_text, delay=10)
+        await asyncio.sleep(2.5)  # Allow Threads to fetch rich link card preview
+
+        # Attach image if available
+        if image_path and os.path.exists(image_path):
+            try:
+                file_input = page.locator('div[role="dialog"] input[type="file"], input[type="file"]').first
+                if await file_input.count() > 0:
+                    await file_input.set_input_files(image_path)
+                    _l("info", "📸 Attached product image to Threads composer!")
+                    await asyncio.sleep(2)
+            except Exception as e_th_img:
+                _l("warning", f"Threads photo attachment note: {e_th_img}")
+
+        checkpoint_name = f"threads_checkpoint_pin_{pin_id}.png"
+        await _take_screenshot(page, checkpoint_name, channel=channel_key, live_frame_fn=live_frame_fn)
+        await asyncio.sleep(1.5)
+
+        # Click "Post" button
+        _l("info", "🚀 Clicking 'Post' button to publish to Threads...")
+        post_btn = page.locator('div[role="dialog"] div[role="button"]:has-text("Post"), div[role="dialog"] button:has-text("Post"), div[role="button"]:has-text("Post")').first
+        await post_btn.wait_for(state="visible", timeout=8000)
+        await post_btn.click(timeout=5000, force=True)
+
+        _l("info", "⏳ Awaiting Threads publication confirmation...")
+        await asyncio.sleep(6)
+
+        proof_name = f"verified_threads_pin_{pin_id}.png"
+        verified_path = await _take_screenshot(page, proof_name, channel=channel_key, live_frame_fn=live_frame_fn)
+        _l("success", f"🎉 Successfully published Pin {pin_id} to Threads ({THREADS_ACCOUNT})! (Proof: {verified_path})")
+        return {"success": True, "screenshotPath": verified_path}
+    except Exception as e_th:
+        _l("error", f"Threads posting note: {e_th}")
+        raise e_th
+    finally:
+        if not page.is_closed():
+            try:
+                await page.close()
+            except Exception:
+                pass
 
 
 async def _publish_to_facebook_group(
@@ -960,10 +1532,8 @@ async def _publish_to_facebook_group(
     # Wait for enabled Post button
     for _ in range(8):
         is_disabled = await page.evaluate("""() => {
-            const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
-                           document.querySelector('div[role="dialog"]:has-text("Create")') ||
-                           document.querySelector('div[role="dialog"]') ||
-                           document.body;
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            const dialog = dialogs.find(d => (d.innerText || '').includes('Create') || d.querySelector('div[role="textbox"][contenteditable="true"]')) || document.body;
             const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
             const p = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
             return !p || p.getAttribute('aria-disabled') === 'true';
@@ -974,10 +1544,8 @@ async def _publish_to_facebook_group(
 
     _l("info", f"🖱️ Publishing deal to {FB_GROUP_NAME}...")
     clicked = await page.evaluate("""() => {
-        const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
-                       document.querySelector('div[role="dialog"]:has-text("Create")') ||
-                       document.querySelector('div[role="dialog"]') ||
-                       document.body;
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        const dialog = dialogs.find(d => (d.innerText || '').includes('Create') || d.querySelector('div[role="textbox"][contenteditable="true"]')) || document.body;
         const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
         const p = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
         if (p && p.getAttribute('aria-disabled') !== 'true') { p.click(); return true; }
@@ -1115,6 +1683,7 @@ async def execute_pinterest_facebook_share(
     target_board_url: Optional[str] = None,
     specific_pin_ids: Optional[List[str]] = None,
     destination: str = "both",
+    destinations: Optional[List[str]] = None,
     start_page: int = 1,
     end_page: Optional[int] = None,
     page_size: int = 6,
@@ -1124,16 +1693,8 @@ async def execute_pinterest_facebook_share(
     on_item_cleared_fn: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Executes WorldNewzs Amazon Products (worldnewzs.in/amazon-products) → Facebook Page & Group
-    automation targeting NEWLY ADDED / UNPOSTED products only (6 products per page).
-    Workflow:
-    1. Pre-flight verification of Facebook session & WorldNewzs Page identity switch
-    2. Open https://worldnewzs.in/amazon-products in Playwright Live Browser with Visual Cursor & HUD
-    3. Snapshot-lock unposted Amazon products (6 products per page, matched by ASIN & amazon.in URL)
-    4. Spotlight active deal card on worldnewzs.in/amazon-products & verify 1500px Amazon image
-    5. Generate dynamic shuffled deal copy with ₹ price, % discount & direct amazon.in affiliate link
-    6. Publish to Facebook Page feed ('WorldNewzs') and/or 'Amazon Affiliate Group'
-    7. Immediately record ASIN in DeduplicationLedger & auto-clear posted product from active queue
+    Executes WorldNewzs Amazon Products → Multi-Channel Meta Social Engine:
+    Facebook Main (Personal), WorldNewzs (Page), LatestNews (Page), ProductInsta (Instagram), ProductThreads (Threads), Facebook Group.
     """
     ledger = DeduplicationLedger()
     results: List[Dict[str, Any]] = []
@@ -1146,7 +1707,36 @@ async def execute_pinterest_facebook_share(
                 log_fn(lvl, msg)
             except Exception:
                 pass
-        _safe_print(f"[WorldNewzs→FB] [{lvl.upper()}] {msg}")
+        _safe_print(f"[Meta Social Engine] [{lvl.upper()}] {msg}")
+
+    # Resolve active target channels (supporting snake_case and PascalCase)
+    def _norm_ch(raw: str) -> Optional[str]:
+        cleaned = raw.replace("-", "_").lower()
+        for k in CHANNEL_DEFINITIONS:
+            if k.lower() == cleaned or k.replace("-", "_").lower() == cleaned:
+                return k
+        return None
+
+    if destinations and len(destinations) > 0:
+        target_channels = []
+        for d in destinations:
+            n = _norm_ch(str(d))
+            if n and n not in target_channels:
+                target_channels.append(n)
+    else:
+        if destination == "both":
+            target_channels = ["WorldNewzs", "Facebook_Group"]
+        elif destination == "page":
+            target_channels = ["WorldNewzs"]
+        elif destination == "group":
+            target_channels = ["Facebook_Group"]
+        else:
+            target_channels = ["WorldNewzs", "Facebook_Group"]
+
+    if not target_channels:
+        target_channels = ["WorldNewzs"]
+
+    dest_labels = ", ".join(CHANNEL_DEFINITIONS[ch]["name"] for ch in target_channels)
 
     # ──────────────────────────────────────────────
     # SNAPSHOT-LOCK UNPOSTED AMAZON PRODUCTS QUEUE (6 PER PAGE)
@@ -1161,7 +1751,10 @@ async def execute_pinterest_facebook_share(
         if not asin or asin in seen_asins:
             continue
         seen_asins.add(asin)
-        if not ledger.is_posted_to_facebook(asin, p_url, p_title):
+
+        # An item is eligible if it has NOT yet been posted to all selected target channels
+        all_channels_posted = all(ledger.is_posted_to_channel(ch, asin, p_url, p_title) for ch in target_channels)
+        if not all_channels_posted:
             idx_in_unposted = len(unposted_deals)
             p_num = (idx_in_unposted // page_size) + 1
             c_idx = idx_in_unposted % page_size
@@ -1178,33 +1771,23 @@ async def execute_pinterest_facebook_share(
             if d_asin in wanted or d_id in wanted:
                 explicit_deals.append(d)
     elif end_page is not None and end_page >= start_page:
-        # Page or Page-Range mode (6 unposted products per page)
         s_idx = max(0, (start_page - 1) * page_size)
         e_idx = max(s_idx + page_size, end_page * page_size)
         explicit_deals = unposted_deals[s_idx:e_idx]
     else:
-        # Count mode starting from start_page
         s_idx = max(0, (start_page - 1) * page_size)
         target_limit = pin_count if pin_count > 0 else len(unposted_deals)
         explicit_deals = unposted_deals[s_idx : s_idx + target_limit]
 
     total_to_process = len(explicit_deals)
-    dest_label = (
-        "WorldNewzs Page + Amazon Affiliate Group"
-        if destination == "both"
-        else "WorldNewzs Page Feed"
-        if destination == "page"
-        else "Amazon Affiliate Group"
-    )
     log(
         "info",
-        f"🚀 Starting WorldNewzs Amazon Products → Facebook Automation "
-        f"(products={total_to_process}, page={start_page}{f'-{end_page}' if end_page and end_page != start_page else ''}, "
-        f"6/page, destination={dest_label}, delay={delay_seconds}s)...",
+        f"🚀 Starting Multi-Channel Meta Social Engine "
+        f"(products={total_to_process}, channels=[{dest_labels}], delay={delay_seconds}s)...",
     )
 
     if total_to_process == 0:
-        log("warning", "⚠️ No unposted Amazon products found for the selected page/criteria. Syncing live products...")
+        log("warning", "⚠️ No unposted Amazon products found for the selected criteria.")
         return {
             "success": True,
             "totalPins": 0,
@@ -1217,55 +1800,44 @@ async def execute_pinterest_facebook_share(
             "results": [],
         }
 
-    context = await get_browser_context()
+    # Pre-flight Facebook session check if any Facebook channels are selected
+    fb_channels = [ch for ch in target_channels if CHANNEL_DEFINITIONS[ch]["platform"] == "facebook"]
+    if fb_channels:
+        context = await get_browser_context("facebook_shared")
+        log("info", "🔒 Step 1: Pre-flight verifying Facebook session...")
+        fb_check_page = await context.new_page()
+        try:
+            await safe_goto(fb_check_page, "https://www.facebook.com/", timeout=40000, log_fn=log)
+            await fb_check_page.bring_to_front()
+            await install_visual_cursor(fb_check_page)
+            await asyncio.sleep(2)
+            fb_ok = await _ensure_facebook_session(fb_check_page, log_fn=log)
+            if not fb_ok:
+                log("error", "❌ Facebook session not available. Please sign in via browser.")
+                return {"success": False, "error": "Facebook not logged in", "results": []}
+        finally:
+            if not fb_check_page.is_closed():
+                await fb_check_page.close()
+    else:
+        context = await get_browser_context()
 
-    # ──────────────────────────────────────────────
-    # STEP 1: Pre-flight — Verify Facebook Session & WorldNewzs Page Identity
-    # ──────────────────────────────────────────────
-    log("info", "🔒 Step 1/7: Verifying Facebook session & WorldNewzs Page identity...")
-    fb_check_page = await context.new_page()
-    try:
-        await safe_goto(fb_check_page, "https://www.facebook.com/", timeout=40000, log_fn=log)
-        await fb_check_page.bring_to_front()
-        await install_visual_cursor(fb_check_page)
-        await asyncio.sleep(2.5)
-        await _take_screenshot(fb_check_page, "fb_share_step1_session_check.png", live_frame_fn=live_frame_fn)
-
-        fb_ok = await _ensure_facebook_session(fb_check_page, log_fn=log)
-        if not fb_ok:
-            log("error", "❌ Facebook session not available. Please sign in via browser.")
-            return {"success": False, "error": "Facebook not logged in", "results": []}
-
-        await _ensure_worldnewzs_profile(fb_check_page, fb_page_url=FB_PAGE_URL, log_fn=log)
-        await _take_screenshot(fb_check_page, "fb_share_step1_profile_ready.png", live_frame_fn=live_frame_fn)
-        log("success", "✅ Step 1 complete — Facebook session & WorldNewzs Page identity verified!")
-    finally:
-        if not fb_check_page.is_closed():
-            await fb_check_page.close()
-
-    # ──────────────────────────────────────────────
-    # STEP 2: Open WorldNewzs Amazon Products Feed (worldnewzs.in/amazon-products)
-    # ──────────────────────────────────────────────
-    log("info", f"🛒 Step 2/7: Opening WorldNewzs Amazon Deals feed ({source_url}) in Live Browser...")
+    # Open WorldNewzs Amazon Deals feed for live visual spotlight
+    log("info", f"🛒 Opening WorldNewzs Amazon Deals feed ({source_url}) in Live Browser...")
     worldnewzs_page = await context.new_page()
     published_count = 0
     try:
         try:
             await safe_goto(worldnewzs_page, source_url, timeout=35000, log_fn=log)
-        except Exception as nav_e:
-            log("info", f"⚡ WorldNewzs page loaded in hybrid mode ({nav_e}); activating Live Deal HUD...")
+        except Exception:
+            pass
         await worldnewzs_page.bring_to_front()
         await install_visual_cursor(worldnewzs_page)
         await asyncio.sleep(2)
-        await _take_screenshot(worldnewzs_page, "fb_share_step2_created_page.png", live_frame_fn=live_frame_fn)
-        log("success", f"✅ Step 2 complete — WorldNewzs Amazon Products active ({total_to_process} unposted deals queued, 6 per page)!")
+        await _take_screenshot(worldnewzs_page, "meta_share_deals_overview.png", live_frame_fn=live_frame_fn)
 
-        # ──────────────────────────────────────────────
-        # PROCESS EACH SNAPSHOT-LOCKED AMAZON PRODUCT
-        # ──────────────────────────────────────────────
         for deal_idx, deal_item in enumerate(explicit_deals, 1):
             if should_stop_fn and should_stop_fn():
-                log("warning", "⏹️ Stop requested by user. Finishing current Facebook batch and generating reports...")
+                log("warning", "⏹️ Stop requested by user. Finishing current batch...")
                 break
 
             asin = str(deal_item.get("asin") or deal_item.get("pinId") or "").strip()
@@ -1278,8 +1850,10 @@ async def execute_pinterest_facebook_share(
             page_num = deal_item.get("pageNumber", start_page)
             card_num = (deal_item.get("cardIndex", (deal_idx - 1) % 6)) + 1
 
-            if ledger.is_posted_to_facebook(asin, deal_url, deal_title):
-                log("info", f"⏩ Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) is already posted to Facebook. Auto-clearing & skipping...")
+            # Determine pending channels for this deal
+            pending_channels = [ch for ch in target_channels if not ledger.is_posted_to_channel(ch, asin, deal_url, deal_title)]
+            if not pending_channels:
+                log("info", f"⏩ Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) already posted to all selected channels. Skipping...")
                 remove_pin_from_cache(asin, deal_url)
                 if on_item_cleared_fn:
                     try:
@@ -1294,24 +1868,21 @@ async def execute_pinterest_facebook_share(
                         pass
                 results.append({
                     "pinIndex": deal_idx,
-                    "pinUrl": deal_url,
                     "pinId": asin,
                     "asin": asin,
                     "title": deal_title,
-                    "price": deal_price,
-                    "discount": deal_discount,
                     "status": "skipped",
-                    "reason": "Already posted to Facebook",
+                    "reason": "Already posted to all selected channels",
                 })
                 continue
 
             log(
                 "info",
-                f"🔍 [Page {page_num} • Card #{card_num}/6] Deal #{deal_idx}/{total_to_process}: "
-                f"ASIN={asin} | {deal_title[:52]}... ({deal_price} • {deal_discount})",
+                f"🔍 [Deal #{deal_idx}/{total_to_process}] ASIN={asin} | {deal_title[:50]}... "
+                f"({deal_price} • {deal_discount}) -> Pending Channels: {len(pending_channels)}",
             )
 
-            # Spotlight this deal card on worldnewzs.in/amazon-products in the Live Browser
+            # Spotlight deal on worldnewzs.in
             await _spotlight_deal_on_worldnewzs_page(
                 page=worldnewzs_page,
                 deal=deal_item,
@@ -1320,15 +1891,7 @@ async def execute_pinterest_facebook_share(
                 live_frame_fn=live_frame_fn,
             )
 
-            if destination == "both":
-                target_name = f"{FB_PAGE_NAME} (Page Feed + Group)"
-            elif destination == "page":
-                target_name = f"{FB_PAGE_NAME} (Page Feed)"
-            else:
-                target_name = f"{FB_GROUP_NAME} (Group)"
-
-            # Step 3: Verify and pre-download high-res Amazon product image locally
-            log("info", f"📸 Step 3/7: Verifying high-res Amazon image & crafting deal copy for ASIN {asin} (Page {page_num}, Card #{card_num}/6)...")
+            # Download & verify image once
             img_checkpoint = await verify_and_download_pin_image(
                 pin_id=asin,
                 pin_url=deal_url,
@@ -1336,64 +1899,188 @@ async def execute_pinterest_facebook_share(
                 log_fn=log,
             )
             verified_image_path = img_checkpoint.get("imagePath")
-            if img_checkpoint.get("imageUrl"):
-                deal_image_url = img_checkpoint["imageUrl"]
 
-            post_data = ContentShuffler.generate_post(deal_item, ledger)
-            resolved_amazon_url = post_data.get("amazonUrl") or deal_url
-            resolved_pinterest_url = post_data.get("pinterestUrl") or os.environ.get("PINTEREST_CREATED_URL", "https://in.pinterest.com/ganeshkumardevarasetty/_created/")
-            post_text = post_data.get(
-                "text",
-                f"🔥 {deal_discount}! {deal_title}\n💰 Deal Price: {deal_price}\n\n🛒 Amazon Product Link: {resolved_amazon_url}\n📌 Pinterest Link: {resolved_pinterest_url}\n🌐 More Deals: https://worldnewzs.in/amazon-products",
-            )
-            log("info", f"📝 Shuffled Amazon Copy: \"{post_text[:75].replace(chr(10), ' ')}...\"")
+            # Post to each pending channel with tailored copy
+            deal_success_count = 0
+            for ch_idx, ch in enumerate(pending_channels, 1):
+                if should_stop_fn and should_stop_fn():
+                    log("warning", "⏹️ Stop requested by user.")
+                    break
 
-            fb_action_page = await context.new_page()
-            try:
-                await install_visual_cursor(fb_action_page)
-                page_proof = None
-                group_proof = None
+                ch_def = CHANNEL_DEFINITIONS[ch]
+                ch_name = ch_def["name"]
+                ch_platform = ch_def["platform"]
 
-                if destination in ["both", "page"]:
-                    log("info", f"📄 Step 4/7: Publishing Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) to WorldNewzs Facebook Page Feed...")
-                    page_res = await _publish_to_facebook_page(
-                        page=fb_action_page,
-                        post_text=post_text,
+                log("info", f"[{ch_idx}/{len(pending_channels)}] Generating {ch_name} unique copy for {asin}...")
+                post_data = ContentShuffler.generate_channel_post(ch, deal_item, ledger)
+                post_text = post_data["text"]
+
+                proof_path = None
+                try:
+                    if ch == "Facebook_Main":
+                        fb_action_page = await context.new_page()
+                        try:
+                            await install_visual_cursor(fb_action_page)
+                            res = await _publish_to_facebook_profile(
+                                page=fb_action_page,
+                                post_text=post_text,
+                                pin_id=asin,
+                                pin_url=deal_url,
+                                image_path=verified_image_path,
+                                log_fn=log,
+                                live_frame_fn=live_frame_fn,
+                            )
+                            proof_path = res.get("screenshotPath")
+                        finally:
+                            if not fb_action_page.is_closed():
+                                await fb_action_page.close()
+
+                    elif ch == "WorldNewzs":
+                        fb_action_page = await context.new_page()
+                        try:
+                            await install_visual_cursor(fb_action_page)
+                            res = await _publish_to_facebook_page(
+                                page=fb_action_page,
+                                post_text=post_text,
+                                pin_id=asin,
+                                pin_url=deal_url,
+                                image_path=verified_image_path,
+                                channel_key="WorldNewzs",
+                                page_url=FB_PAGE_URL,
+                                page_name="WorldNewzs",
+                                log_fn=log,
+                                live_frame_fn=live_frame_fn,
+                            )
+                            proof_path = res.get("screenshotPath")
+                        finally:
+                            if not fb_action_page.is_closed():
+                                await fb_action_page.close()
+
+                    elif ch == "LatestNews":
+                        fb_action_page = await context.new_page()
+                        try:
+                            await install_visual_cursor(fb_action_page)
+                            res = await _publish_to_facebook_page(
+                                page=fb_action_page,
+                                post_text=post_text,
+                                pin_id=asin,
+                                pin_url=deal_url,
+                                image_path=verified_image_path,
+                                channel_key="LatestNews",
+                                page_url=FB_PAGE_2_URL,
+                                page_name="LatestNews",
+                                log_fn=log,
+                                live_frame_fn=live_frame_fn,
+                            )
+                            proof_path = res.get("screenshotPath")
+                        finally:
+                            if not fb_action_page.is_closed():
+                                await fb_action_page.close()
+
+                    elif ch == "Facebook_Group":
+                        fb_action_page = await context.new_page()
+                        try:
+                            await install_visual_cursor(fb_action_page)
+                            res = await _publish_to_facebook_group(
+                                page=fb_action_page,
+                                post_text=post_text,
+                                pin_id=asin,
+                                pin_url=deal_url,
+                                image_path=verified_image_path,
+                                log_fn=log,
+                                live_frame_fn=live_frame_fn,
+                            )
+                            proof_path = res.get("screenshotPath")
+                        finally:
+                            if not fb_action_page.is_closed():
+                                await fb_action_page.close()
+
+                    elif ch == "ProductInsta":
+                        res = await _publish_to_instagram(
+                            post_text=post_text,
+                            pin_id=asin,
+                            pin_url=deal_url,
+                            image_path=verified_image_path,
+                            log_fn=log,
+                            live_frame_fn=live_frame_fn,
+                        )
+                        proof_path = res.get("screenshotPath")
+
+                    elif ch == "ProductThreads":
+                        res = await _publish_to_threads(
+                            post_text=post_text,
+                            pin_id=asin,
+                            pin_url=deal_url,
+                            image_path=verified_image_path,
+                            log_fn=log,
+                            live_frame_fn=live_frame_fn,
+                        )
+                        proof_path = res.get("screenshotPath")
+
+                    ledger.record_channel_share(
+                        channel=ch,
                         pin_id=asin,
                         pin_url=deal_url,
-                        image_path=verified_image_path,
-                        log_fn=log,
-                        live_frame_fn=live_frame_fn,
+                        title=deal_title,
+                        text=post_text,
+                        target=ch_name,
+                        screenshot_path=proof_path or "",
+                        status="success",
                     )
-                    page_proof = page_res.get("screenshotPath")
-
-                # Early-exit checkpoint if stop was requested during Page publish
-                if destination in ["both", "group"] and should_stop_fn and should_stop_fn():
-                    log("warning", "⏹️ Stop requested by user. Skipping group publish to finish batch immediately...")
-                elif destination in ["both", "group"]:
-                    log("info", f"👥 Step 5/7: Publishing Deal #{deal_idx}/{total_to_process} (ASIN: {asin}) to {FB_GROUP_NAME}...")
-                    group_res = await _publish_to_facebook_group(
-                        page=fb_action_page,
-                        post_text=post_text,
+                    results.append({
+                        "pinIndex": deal_idx,
+                        "pinId": asin,
+                        "asin": asin,
+                        "title": deal_title,
+                        "price": deal_price,
+                        "originalPrice": deal_orig_price,
+                        "discount": deal_discount,
+                        "channel": ch,
+                        "target": ch_name,
+                        "platform": ch_platform,
+                        "destination": ch,
+                        "content": post_text,
+                        "imageUrl": deal_image_url,
+                        "imageVerified": img_checkpoint.get("verified", False),
+                        "screenshotPath": proof_path or "",
+                        "status": "success",
+                        "verified": True,
+                    })
+                    deal_success_count += 1
+                    published_count += 1
+                except Exception as ch_err:
+                    err_msg = str(ch_err)
+                    log("error", f"❌ Failed to publish to {ch_name} for ASIN {asin}: {err_msg}")
+                    ledger.record_channel_share(
+                        channel=ch,
                         pin_id=asin,
                         pin_url=deal_url,
-                        image_path=verified_image_path,
-                        log_fn=log,
-                        live_frame_fn=live_frame_fn,
+                        title=deal_title,
+                        text=post_text,
+                        target=ch_name,
+                        screenshot_path="",
+                        status="failed",
+                        error_message=err_msg,
                     )
-                    group_proof = group_res.get("screenshotPath")
+                    results.append({
+                        "pinIndex": deal_idx,
+                        "pinId": asin,
+                        "asin": asin,
+                        "title": deal_title,
+                        "channel": ch,
+                        "target": ch_name,
+                        "platform": ch_platform,
+                        "status": "failed",
+                        "error": err_msg,
+                    })
 
-                log("info", f"💾 Step 6/7: Recording ASIN {asin} in DeduplicationLedger & auto-clearing from active queue...")
-                verified_path = group_proof or page_proof or ""
-                ledger.record_facebook_share(
-                    pin_id=asin,
-                    pin_url=deal_url,
-                    title=deal_title,
-                    text=post_text,
-                    target=target_name,
-                    screenshot_path=verified_path,
-                    status="success",
-                )
+                # Anti-ban inter-channel delay (10 seconds)
+                if ch_idx < len(pending_channels) and not (should_stop_fn and should_stop_fn()):
+                    log("info", "⏳ Inter-channel pause: waiting 10s before next channel...")
+                    await asyncio.sleep(10)
+
+            # Auto-clear deal once processed
+            if deal_success_count > 0:
                 remove_pin_from_cache(asin, deal_url)
                 if on_item_cleared_fn:
                     try:
@@ -1404,68 +2091,6 @@ async def execute_pinterest_facebook_share(
                             "pageNumber": page_num,
                             "cardIndex": card_num - 1,
                         })
-                    except Exception:
-                        pass
-
-                log(
-                    "success",
-                    f"🎉 Step 7/7 complete: Amazon Deal {asin} (Page {page_num} Card #{card_num}/6) published to {target_name} & auto-cleared!",
-                )
-
-                results.append({
-                    "pinIndex": deal_idx,
-                    "pinUrl": resolved_pinterest_url,
-                    "dealUrl": resolved_amazon_url,
-                    "amazonUrl": resolved_amazon_url,
-                    "pinterestUrl": resolved_pinterest_url,
-                    "pinId": asin,
-                    "asin": asin,
-                    "title": deal_title,
-                    "price": deal_price,
-                    "originalPrice": deal_orig_price,
-                    "discount": deal_discount,
-                    "pageNumber": page_num,
-                    "cardNumber": card_num,
-                    "status": "success",
-                    "target": target_name,
-                    "destination": destination,
-                    "content": post_text,
-                    "imageUrl": deal_image_url,
-                    "imageVerified": img_checkpoint.get("verified", False),
-                    "screenshotPath": verified_path,
-                    "pageProof": page_proof,
-                    "groupProof": group_proof,
-                    "verified": True,
-                })
-                published_count += 1
-            except Exception as fe:
-                err_msg = str(fe)
-                log("error", f"❌ Facebook posting error for Deal #{deal_idx} (ASIN {asin}): {err_msg}")
-                ledger.record_facebook_share(
-                    pin_id=asin,
-                    pin_url=deal_url,
-                    title=deal_title,
-                    text=post_text if "post_text" in locals() else "",
-                    target=target_name,
-                    screenshot_path="",
-                    status="failed",
-                    error_message=err_msg,
-                )
-                results.append({
-                    "pinIndex": deal_idx,
-                    "pinUrl": deal_url,
-                    "dealUrl": deal_url,
-                    "pinId": asin,
-                    "asin": asin,
-                    "title": deal_title,
-                    "price": deal_price,
-                    "status": "failed",
-                    "error": err_msg,
-                })
-            finally:
-                if not fb_action_page.is_closed():
-                    try:
-                        await fb_action_page.close()
                     except Exception:
                         pass
 
