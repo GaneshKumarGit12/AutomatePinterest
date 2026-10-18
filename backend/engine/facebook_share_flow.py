@@ -666,7 +666,7 @@ async def _ensure_personal_profile(
     page: Page,
     log_fn: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
-    """Ensures Facebook is switched to the personal profile (ganeshkumard56) rather than a Page."""
+    """Ensures Facebook is switched to the personal profile (Ganesh Kumar / ganeshkumard56) rather than a Page."""
     def _l(lvl: str, msg: str):
         if log_fn:
             try:
@@ -676,30 +676,77 @@ async def _ensure_personal_profile(
         _safe_print(f"[Personal Profile Switch] [{lvl.upper()}] {msg}")
 
     try:
-        is_page = await page.evaluate("""() => {
-            const body = document.body.innerText || '';
-            return body.includes('Manage Page') || body.includes('Professional dashboard');
-        }""")
-        if not is_page:
-            _l("success", "✅ Already acting as personal profile on Facebook.")
+        # 1. Check for on-page direct switch banner (e.g. "Switch to Ganesh Kumar")
+        direct_btn = page.locator(
+            'div[aria-label*="Switch into Ganesh Kumar" i], '
+            'div[aria-label*="Switch to Ganesh Kumar" i], '
+            'div[role="button"]:has-text("Switch into Ganesh Kumar"), '
+            'div[role="button"]:has-text("Switch to Ganesh Kumar")'
+        ).first
+        if await direct_btn.count() > 0 and await direct_btn.is_visible():
+            _l("info", "🖱️ Found on-page 'Switch to Ganesh Kumar' trigger, clicking...")
+            await direct_btn.click(timeout=5000)
+            await asyncio.sleep(6)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            _l("success", "🎉 Successfully switched to Personal Profile via direct button!")
             return True
 
-        _l("info", "🔄 Switching from Page identity back to Personal Profile (Ganesh Kumar)...")
-        profile_icon = page.locator('div[aria-label="Your profile"]').first
+        # 2. Inspect top-right profile avatar menu
+        profile_icon = page.locator('div[aria-label="Your profile"], div[aria-label="Your Profile"]').first
         if await profile_icon.count() > 0 and await profile_icon.is_visible():
-            await profile_icon.click(timeout=4000)
+            await profile_icon.click(timeout=5000)
             await asyncio.sleep(2)
+
+            # Evaluate opened profile menu state
+            switch_status = await page.evaluate("""() => {
+                const dialog = document.querySelector('div[role="dialog"], div[role="menu"], div[data-pagelet="root"]');
+                if (!dialog) return { isMenu: false, alreadyPersonal: false };
+                const txt = dialog.innerText || '';
+                const hasGaneshHeader = txt.includes('Ganesh Kumar') && (txt.includes('See your profile') || txt.includes('See profile'));
+                const hasSwitchToGanesh = txt.includes('Switch to Ganesh Kumar') || txt.includes('Switch into Ganesh Kumar');
+                return {
+                    isMenu: true,
+                    alreadyPersonal: hasGaneshHeader && !hasSwitchToGanesh,
+                    txtSnippet: txt.substring(0, 150)
+                };
+            }""")
+
+            if switch_status.get("alreadyPersonal"):
+                _l("success", "✅ Already acting as personal profile (Ganesh Kumar) on Facebook.")
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return True
+
+            _l("info", "🔄 Switching from Page identity back to Personal Profile (Ganesh Kumar)...")
+
+            # Check for direct switch tile in menu
             personal_tile = page.locator(
-                'div[role="button"]:has-text("Ganesh Kumar"), '
-                'div[role="listitem"]:has-text("Ganesh Kumar"), '
-                '[aria-label*="Ganesh Kumar" i]'
+                'div[role="dialog"] div[role="button"]:has-text("Ganesh Kumar"), '
+                'div[role="dialog"] div[role="listitem"]:has-text("Ganesh Kumar"), '
+                'div[role="dialog"] [aria-label*="Ganesh Kumar" i], '
+                'div[role="menu"] div[role="button"]:has-text("Ganesh Kumar"), '
+                'div[role="menu"] [aria-label*="Ganesh Kumar" i]'
             ).first
+
+            switched = False
             if await personal_tile.count() > 0 and await personal_tile.is_visible():
+                _l("info", "🖱️ Selected Ganesh Kumar switch tile from profile menu...")
                 await personal_tile.click(timeout=5000)
+                switched = True
                 await asyncio.sleep(6)
             else:
-                see_all = page.locator('div[role="button"]:has-text("See all profiles"), span:has-text("See all profiles")').first
+                see_all = page.locator(
+                    'div[role="button"]:has-text("See all profiles"), '
+                    'span:has-text("See all profiles"), '
+                    'div[role="listitem"]:has-text("See all profiles")'
+                ).first
                 if await see_all.count() > 0 and await see_all.is_visible():
+                    _l("info", "🖱️ Clicking 'See all profiles' in menu...")
                     await see_all.click(timeout=4000)
                     await asyncio.sleep(2)
                     personal_tile2 = page.locator(
@@ -708,14 +755,21 @@ async def _ensure_personal_profile(
                         '[aria-label*="Ganesh Kumar" i]'
                     ).first
                     if await personal_tile2.count() > 0 and await personal_tile2.is_visible():
+                        _l("info", "🖱️ Selected Ganesh Kumar from all profiles list...")
                         await personal_tile2.click(timeout=5000)
+                        switched = True
                         await asyncio.sleep(6)
+
             try:
                 await page.keyboard.press("Escape")
             except Exception:
                 pass
-            _l("success", "🎉 Successfully switched to Personal Profile!")
-            return True
+
+            if switched:
+                _l("success", "🎉 Successfully switched to Personal Profile (Ganesh Kumar)!")
+                return True
+
+            return False
     except Exception as e:
         _l("warning", f"Personal profile switch note: {e}")
     return False
@@ -1369,98 +1423,107 @@ async def _publish_to_facebook_group(
     except Exception:
         pass
 
-    # Scroll down so group composer is centered in viewport
-    await page.evaluate("window.scrollBy(0, 350)")
-    await asyncio.sleep(1.5)
+    # Ensure Facebook profile is switched to personal account (Ganesh Kumar) so group composer is accessible
+    await _ensure_personal_profile(page, log_fn=_l)
 
-    # Open group composer ('Write something...', 'Create a public post...')
-    _l("info", f"📝 Opening group post composer in {FB_GROUP_NAME}...")
-    trigger_clicked = await page.evaluate("""() => {
-        const triggers = Array.from(document.querySelectorAll('div[role="button"], span, div[tabindex="0"]'));
-        const trigger = triggers.find(t => {
-            const txt = (t.innerText || '').trim();
-            return txt.includes('Write something...') || 
-                   txt.includes('Create a public post') || 
-                   txt.includes('Create a post') || 
-                   txt.includes("What's on your mind?");
-        });
-        if (trigger) {
-            trigger.scrollIntoView({ block: 'center', behavior: 'instant' });
-            const btn = trigger.closest('div[role="button"]') || trigger;
-            btn.click();
-            return true;
-        }
-        return false;
-    }""")
-    if not trigger_clicked:
-        composer_trigger = page.locator(
-            'div[role="button"]:has-text("Write something..."), '
-            'span:has-text("Write something..."), '
-            'div[role="button"]:has-text("Create a public post"), '
-            'div[role="button"]:has-text("Create a post"), '
-            'div[role="button"]:has-text("What\'s on your mind?")'
+    # Re-verify we are on the group page after any profile switch reload
+    if "groups" not in page.url or "1761596288324903" not in page.url:
+        _l("info", f"👥 Re-navigating to Amazon Affiliate Group ({FB_GROUP_URL})...")
+        await safe_goto(page, FB_GROUP_URL, timeout=45000, log_fn=_l)
+        await asyncio.sleep(3)
+
+    # Dismiss single-character shortcuts prompt if present
+    try:
+        shortcuts_btn = page.locator(
+            'div[role="dialog"]:has-text("single-character shortcuts") [role="button"]:has-text("Turn off"), '
+            'div[role="dialog"]:has-text("single-character shortcuts") button:has-text("Turn off"), '
+            'div[role="dialog"]:has-text("single-character shortcuts") [aria-label="Close"]'
         ).first
-        if await composer_trigger.count() > 0:
-            try:
-                await composer_trigger.click(timeout=5000, force=True)
-            except Exception:
-                pass
+        if await shortcuts_btn.count() > 0 and await shortcuts_btn.is_visible():
+            await shortcuts_btn.click(timeout=3000)
+            await asyncio.sleep(1)
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
 
-    await asyncio.sleep(2.5)
+    # Locate and click group post composer trigger ("Write something...", "Create a public post...")
+    _l("info", f"📝 Opening group post composer in {FB_GROUP_NAME}...")
+    trigger_selector = (
+        'div[role="button"]:has-text("Write something..."), '
+        'span:has-text("Write something..."), '
+        'div[role="button"]:has-text("Create a public post"), '
+        'span:has-text("Create a public post"), '
+        'div[role="button"]:has-text("Create a post"), '
+        'span:has-text("Create a post"), '
+        'div[role="button"]:has-text("What\'s on your mind?")'
+    )
 
-    # Resilient textbox query across all dialogs and page
-    textbox_loc = page.locator(
-        'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]) div[role="textbox"][contenteditable="true"], '
-        'div[role="dialog"]:has-text("Create") div[role="textbox"][contenteditable="true"], '
-        'div[role="textbox"][contenteditable="true"]'
-    ).first
-
-    # If textbox is not yet visible, retry clicking the composer trigger (up to 3 attempts)
-    for attempt in range(3):
-        try:
-            if await textbox_loc.count() > 0 and await textbox_loc.is_visible():
-                break
-        except Exception:
-            pass
-
-        _l("info", f"🔄 Retrying group composer trigger click (attempt {attempt + 1}/3)...")
-        await page.evaluate("""() => {
-            const triggers = Array.from(document.querySelectorAll('div[role="button"], span, div[tabindex="0"]'));
-            const trigger = triggers.find(t => {
-                const txt = (t.innerText || '').trim();
-                return txt.includes('Write something...') || 
-                       txt.includes('Create a public post') || 
-                       txt.includes('Create a post') || 
-                       txt.includes("What's on your mind?");
-            });
-            if (trigger) {
-                const btn = trigger.closest('div[role="button"]') || trigger;
-                btn.scrollIntoView({ block: 'center', behavior: 'instant' });
-                btn.click();
-            }
-        }""")
-        await asyncio.sleep(2.5)
-
-    await textbox_loc.wait_for(state="visible", timeout=12000)
-
-    # Scoped dialog containing the active composer
     dialog_loc = page.locator(
         'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]), '
         'div[role="dialog"]:has-text("Create a public post"), '
         'div[role="dialog"]:has-text("Create post")'
     ).first
-    if await dialog_loc.count() == 0:
-        dialog_loc = page.locator('div[role="dialog"]').first
 
-    try:
-        await textbox_loc.click(timeout=4000, force=True)
-    except Exception:
-        await page.evaluate("""() => {
-            const tb = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]) div[role="textbox"][contenteditable="true"]') ||
-                       document.querySelector('div[role="dialog"] div[role="textbox"][contenteditable="true"]') ||
-                       document.querySelector('div[role="textbox"][contenteditable="true"]');
-            if (tb) { tb.focus(); tb.click(); }
+    dialog_opened = False
+    for attempt in range(4):
+        if await dialog_loc.count() > 0 and await dialog_loc.is_visible():
+            dialog_opened = True
+            break
+
+        _l("info", f"🖱️ Attempting to open group composer (attempt {attempt + 1}/4)...")
+        # 1. Try JS evaluate click on trigger
+        clicked = await page.evaluate("""() => {
+            const triggers = Array.from(document.querySelectorAll('div[role="button"], span, div[tabindex="0"]'));
+            const trigger = triggers.find(t => {
+                const txt = (t.innerText || '').trim();
+                return txt === 'Write something...' || 
+                       txt.startsWith('Write something') || 
+                       txt.includes('Create a public post') || 
+                       txt.includes('Create a post') || 
+                       txt.includes("What's on your mind?");
+            });
+            if (trigger) {
+                trigger.scrollIntoView({ block: 'center', behavior: 'instant' });
+                const btn = trigger.closest('div[role="button"]') || trigger;
+                btn.click();
+                return true;
+            }
+            return false;
         }""")
+
+        # 2. Try Playwright locator click
+        if not clicked:
+            composer_trigger = page.locator(trigger_selector).first
+            if await composer_trigger.count() > 0:
+                try:
+                    await composer_trigger.scroll_into_view_if_needed()
+                    await composer_trigger.click(timeout=4000, force=True)
+                except Exception:
+                    pass
+
+        await asyncio.sleep(2.5)
+        if await dialog_loc.count() > 0 and await dialog_loc.is_visible():
+            dialog_opened = True
+            break
+
+        # If not opened, gently scroll to make sure composer is in view
+        if attempt == 0:
+            await page.evaluate("window.scrollTo(0, 0)")
+        elif attempt == 1:
+            await page.evaluate("window.scrollBy(0, 250)")
+        await asyncio.sleep(1)
+
+    # Strictly require dialog to be visible before typing (prevents comment box hijacking!)
+    await dialog_loc.wait_for(state="visible", timeout=12000)
+
+    # Strictly query textbox INSIDE dialog, excluding feed comment boxes
+    textbox_loc = dialog_loc.locator(
+        'div[role="textbox"][contenteditable="true"]:not([aria-label*="Comment" i])'
+    ).first
+    await textbox_loc.wait_for(state="visible", timeout=8000)
+    await textbox_loc.scroll_into_view_if_needed()
+    await textbox_loc.focus()
+    await textbox_loc.click(timeout=3000, force=True)
     await asyncio.sleep(0.5)
 
     clean_text = post_text.replace("\r", "")
@@ -1482,9 +1545,6 @@ async def _publish_to_facebook_group(
         try:
             file_input = dialog_loc.locator('input[type="file"][accept*="image"], input[type="file"]').first
             if await file_input.count() == 0:
-                file_input = page.locator('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]) input[type="file"], input[type="file"][accept*="image"]').first
-
-            if await file_input.count() == 0:
                 photo_btn = dialog_loc.locator(
                     'div[aria-label*="Photo/video" i], '
                     'div[aria-label*="Photo" i], '
@@ -1496,8 +1556,6 @@ async def _publish_to_facebook_group(
                     await photo_btn.click()
                     await asyncio.sleep(1)
                     file_input = dialog_loc.locator('input[type="file"][accept*="image"], input[type="file"]').first
-                    if await file_input.count() == 0:
-                        file_input = page.locator('input[type="file"][accept*="image"], input[type="file"]').first
 
             if await file_input.count() > 0:
                 await file_input.set_input_files(image_path)
@@ -1529,13 +1587,18 @@ async def _publish_to_facebook_group(
     await _take_screenshot(page, f"fb_group_checkpoint_verified_pin_{pin_id}.png", live_frame_fn=live_frame_fn)
     await asyncio.sleep(2)
 
-    # Wait for enabled Post button
-    for _ in range(8):
+    # Wait for enabled Post button inside dialog
+    for _ in range(10):
         is_disabled = await page.evaluate("""() => {
-            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-            const dialog = dialogs.find(d => (d.innerText || '').includes('Create') || d.querySelector('div[role="textbox"][contenteditable="true"]')) || document.body;
+            const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
+                           document.querySelector('div[role="dialog"]');
+            if (!dialog) return true;
             const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-            const p = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
+            const p = btns.find(b => {
+                const t = (b.innerText || '').trim();
+                const a = b.getAttribute('aria-label') || '';
+                return t === 'Post' || t === 'Share' || a === 'Post' || a === 'Share';
+            });
             return !p || p.getAttribute('aria-disabled') === 'true';
         }""")
         if not is_disabled:
@@ -1544,22 +1607,27 @@ async def _publish_to_facebook_group(
 
     _l("info", f"🖱️ Publishing deal to {FB_GROUP_NAME}...")
     clicked = await page.evaluate("""() => {
-        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-        const dialog = dialogs.find(d => (d.innerText || '').includes('Create') || d.querySelector('div[role="textbox"][contenteditable="true"]')) || document.body;
+        const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
+                       document.querySelector('div[role="dialog"]');
+        if (!dialog) return false;
         const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-        const p = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
+        const p = btns.find(b => {
+            const t = (b.innerText || '').trim();
+            const a = b.getAttribute('aria-label') || '';
+            return t === 'Post' || t === 'Share' || a === 'Post' || a === 'Share';
+        });
         if (p && p.getAttribute('aria-disabled') !== 'true') { p.click(); return true; }
         return false;
     }""")
     if not clicked:
-        post_btn_loc = dialog_loc.locator('[role="button"]:has-text("Post"), button:has-text("Post"), [aria-label="Post"]').first
-        if await post_btn_loc.count() == 0:
-            post_btn_loc = page.locator('div[role="dialog"] [role="button"]:has-text("Post"), div[role="dialog"] button:has-text("Post")').first
+        post_btn_loc = dialog_loc.locator(
+            '[role="button"]:has-text("Post"), button:has-text("Post"), [aria-label="Post"], [role="button"]:has-text("Share"), button:has-text("Share")'
+        ).first
         await post_btn_loc.click(timeout=6000, force=True)
 
     _l("info", f"⏳ Awaiting post processing and publication in {FB_GROUP_NAME}...")
     try:
-        await page.locator('div[role="dialog"]:has-text("Create post"), div[role="dialog"]:has-text("Create a public post")').first.wait_for(
+        await dialog_loc.wait_for(
             state="hidden",
             timeout=20000
         )
