@@ -470,7 +470,7 @@ async def _ensure_facebook_page_profile(
                 pass
         _safe_print(f"[Profile Switch] [{lvl.upper()}] {msg}")
 
-    # Build name variants (e.g. "LatestNews", "Latest News", "Latestnews")
+    # Build name variants (e.g. "LatestNews", "Latest News", "Latestnews", "WorldNewzs", "World Newzs")
     name_variants = [page_name]
     spaced_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', page_name).strip()
     if spaced_name not in name_variants:
@@ -479,10 +479,19 @@ async def _ensure_facebook_page_profile(
     if unspaced_name not in name_variants:
         name_variants.append(unspaced_name)
 
+    page_id_match = re.search(r'id=(\d+)', fb_page_url)
+    target_id = page_id_match.group(1) if page_id_match else ""
+
     try:
-        _l("info", f"Checking Facebook identity status on '{fb_page_url}' ({page_name})...")
-        await safe_goto(page, fb_page_url, timeout=45000, log_fn=_l)
-        await asyncio.sleep(3.5)
+        # Check current URL before re-navigating to prevent redundant navigation crashes
+        curr_url = page.url or ""
+        if (target_id and target_id not in curr_url) and (fb_page_url not in curr_url):
+            try:
+                _l("info", f"Navigating to '{fb_page_url}' ({page_name})...")
+                await safe_goto(page, fb_page_url, timeout=45000, log_fn=_l)
+                await asyncio.sleep(3)
+            except Exception as nav_e:
+                _l("warning", f"Page navigation notice (continuing): {nav_e}")
 
         try:
             await page.keyboard.press("Escape")
@@ -490,44 +499,13 @@ async def _ensure_facebook_page_profile(
         except Exception:
             pass
 
-        # Check if the page displays an explicit switch banner or button targeting this page
-        needs_switch = await page.evaluate("""(variants) => {
-            const body = document.body.innerText || '';
-            for (const v of variants) {
-                if (body.includes(`Switch into ${v}`) || 
-                    body.includes(`Switch to ${v}`) || 
-                    body.includes(`Switch into this Page`) ||
-                    body.includes(`Switch into your Page`)) {
-                    return true;
-                }
-            }
-            // Check if there is an explicit Switch button in navigation/header
-            const buttons = Array.from(document.querySelectorAll('div[role="navigation"] div[role="button"], div[role="main"] div[role="button"], [role="button"]'));
-            const navSwitch = buttons.find(b => {
-                const txt = (b.innerText || '').trim();
-                const aria = b.getAttribute('aria-label') || '';
-                return txt === 'Switch' || txt === 'Switch Now' || aria === 'Switch' || aria.includes('Switch into');
-            });
-            if (navSwitch) {
-                return true;
-            }
-            return false;
-        }""", name_variants)
-
-        # Check if composer already visible on page ("What's on your mind?" or "Create a post")
+        # 1. Quick check: Is composer already available on the page?
         has_composer = await page.evaluate("""() => {
             const body = document.body.innerText || '';
-            return body.includes("What's on your mind?") || body.includes("Create a post");
+            return body.includes("What's on your mind") || body.includes("Create a post") || body.includes("Create post") || body.includes("Write something");
         }""")
 
-        if not needs_switch and has_composer:
-            _l("success", f"✅ Facebook session is already acting as {page_name} (Page Admin, composer ready)!")
-            return True
-
-        # Need to switch profile!
-        _l("info", f"🔄 Switching profile to {page_name} Page identity...")
-
-        # 1. First attempt: Direct Switch button on page banner/navigation
+        # 2. Check for on-page direct Switch trigger banner (e.g. "Switch into WorldNewzs")
         switch_clicked = False
         direct_btn = page.locator(
             'div[role="navigation"] div[role="button"]:has-text("Switch"), '
@@ -544,8 +522,7 @@ async def _ensure_facebook_page_profile(
                 await direct_btn.scroll_into_view_if_needed()
                 await direct_btn.click(timeout=5000)
                 switch_clicked = True
-            except Exception as e:
-                _l("warning", f"Playwright click error on direct switch button, trying JS click: {e}")
+            except Exception:
                 switch_clicked = await page.evaluate("""() => {
                     const btn = Array.from(document.querySelectorAll('div[role="button"], [aria-label="Switch"]')).find(e => {
                         const t = (e.innerText || '').trim();
@@ -556,7 +533,6 @@ async def _ensure_facebook_page_profile(
                     return false;
                 }""")
 
-        # 2. Check for confirmation modal dialog
         if switch_clicked:
             await asyncio.sleep(2.5)
             dialog_btn = page.locator(
@@ -581,34 +557,112 @@ async def _ensure_facebook_page_profile(
             except Exception:
                 pass
 
-        # 3. Fallback: Switch via top-right profile avatar menu
+        # 3. If direct switch wasn't clicked, open top-right profile avatar menu
         if not switch_clicked:
-            _l("info", f"🖱️ Attempting switch to {page_name} via top-right profile avatar...")
-            profile_icon = page.locator('div[aria-label="Your profile"]').first
+            profile_icon = page.locator(
+                'div[aria-label="Your profile"], '
+                'div[aria-label="Your Profile"], '
+                '[aria-label="Your profile"][role="button"], '
+                '[aria-label="Your Profile"][role="button"]'
+            ).first
+
             if await profile_icon.count() > 0 and await profile_icon.is_visible():
-                await profile_icon.click(timeout=5000)
+                try:
+                    await profile_icon.click(timeout=5000)
+                except Exception:
+                    await page.evaluate("""() => {
+                        const p = document.querySelector('div[aria-label="Your profile"], div[aria-label="Your Profile"], [aria-label="Your profile"][role="button"]');
+                        if (p) p.click();
+                    }""")
                 await asyncio.sleep(2)
 
-                # Check for "See all profiles" button in menu
-                see_all = page.locator('div[role="button"]:has-text("See all profiles"), span:has-text("See all profiles")').first
-                if await see_all.count() > 0 and await see_all.is_visible():
-                    _l("info", "🖱️ Clicking 'See all profiles' in menu...")
-                    await see_all.click(timeout=4000)
-                    await asyncio.sleep(2)
+                # Inspect open menu to see who the active profile is:
+                menu_info = await page.evaluate("""(variants) => {
+                    const dialog = document.querySelector('div[role="dialog"], div[role="menu"], div[data-pagelet="root"]');
+                    if (!dialog) return { isMenu: false, isAlreadyTarget: false, activeName: "" };
+                    const lines = (dialog.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                    const activeName = lines[0] || '';
+                    const isAlreadyTarget = variants.some(v => activeName.toLowerCase().includes(v.toLowerCase()));
+                    return { isMenu: true, isAlreadyTarget, activeName };
+                }""", name_variants)
 
-                # Look for target page tile among variants
+                if menu_info.get("isAlreadyTarget") and has_composer:
+                    _l("success", f"✅ Facebook session is already acting as {page_name} (active profile: {menu_info.get('activeName')})!")
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    return True
+
+                _l("info", f"🔄 Switching from '{menu_info.get('activeName')}' to {page_name} Page identity...")
+
+                # Look for target page tile directly in menu first
                 target_found = False
                 for variant in name_variants:
                     page_tile = page.locator(
-                        f'div[role="button"]:has-text("{variant}"), '
-                        f'div[role="listitem"]:has-text("{variant}"), '
-                        f'[aria-label*="{variant}" i]'
+                        f'div[role="dialog"] div[role="button"]:has-text("{variant}"), '
+                        f'div[role="dialog"] div[role="listitem"]:has-text("{variant}"), '
+                        f'div[role="dialog"] [aria-label*="{variant}" i], '
+                        f'div[role="menu"] div[role="button"]:has-text("{variant}"), '
+                        f'div[role="menu"] div[role="listitem"]:has-text("{variant}"), '
+                        f'div[role="menu"] [aria-label*="{variant}" i]'
                     ).first
                     if await page_tile.count() > 0 and await page_tile.is_visible():
                         _l("info", f"🖱️ Selected profile tile '{variant}'...")
-                        await page_tile.click(timeout=5000)
+                        try:
+                            await page_tile.click(timeout=5000)
+                        except Exception:
+                            await page.evaluate("""(v) => {
+                                const dialog = document.querySelector('div[role="dialog"], div[role="menu"]');
+                                if (!dialog) return;
+                                const items = Array.from(dialog.querySelectorAll('div[role="button"], div[role="listitem"]'));
+                                const m = items.find(el => (el.innerText || '').toLowerCase().includes(v.toLowerCase()));
+                                if (m) m.click();
+                            }""", variant)
                         target_found = True
                         break
+
+                # If not found directly, click "See all profiles"
+                if not target_found:
+                    see_all = page.locator(
+                        'div[role="button"]:has-text("See all profiles"), '
+                        'span:has-text("See all profiles"), '
+                        'div[role="listitem"]:has-text("See all profiles")'
+                    ).first
+                    if await see_all.count() > 0 and await see_all.is_visible():
+                        _l("info", "🖱️ Clicking 'See all profiles' in menu...")
+                        try:
+                            await see_all.click(timeout=4000)
+                        except Exception:
+                            await page.evaluate("""() => {
+                                const b = Array.from(document.querySelectorAll('div[role="button"], span')).find(el => (el.innerText || '').trim() === 'See all profiles');
+                                if (b) b.click();
+                            }""")
+                        await asyncio.sleep(2.5)
+
+                        for variant in name_variants:
+                            page_tile2 = page.locator(
+                                f'div[role="dialog"] div[role="button"]:has-text("{variant}"), '
+                                f'div[role="dialog"] div[role="listitem"]:has-text("{variant}"), '
+                                f'div[role="dialog"] [aria-label*="{variant}" i], '
+                                f'div[role="menu"] div[role="button"]:has-text("{variant}"), '
+                                f'div[role="menu"] div[role="listitem"]:has-text("{variant}"), '
+                                f'div[role="menu"] [aria-label*="{variant}" i]'
+                            ).first
+                            if await page_tile2.count() > 0 and await page_tile2.is_visible():
+                                _l("info", f"🖱️ Selected profile tile '{variant}' from all profiles list...")
+                                try:
+                                    await page_tile2.click(timeout=5000)
+                                except Exception:
+                                    await page.evaluate("""(v) => {
+                                        const dialog = document.querySelector('div[role="dialog"], div[role="menu"]');
+                                        if (!dialog) return;
+                                        const items = Array.from(dialog.querySelectorAll('div[role="button"], div[role="listitem"]'));
+                                        const m = items.find(el => (el.innerText || '').toLowerCase().includes(v.toLowerCase()));
+                                        if (m) m.click();
+                                    }""", variant)
+                                target_found = True
+                                break
 
                 if target_found:
                     _l("info", f"⏳ Waiting for profile switch to {page_name}...")
@@ -618,32 +672,21 @@ async def _ensure_facebook_page_profile(
                     except Exception:
                         pass
 
-        # Verification check: Check if composer or admin tools now visible
-        await asyncio.sleep(2)
-        verified = await page.evaluate("""(variants) => {
-            const body = document.body.innerText || '';
-            const hasComposer = body.includes("What's on your mind?") || body.includes("Create a post");
-            const hasSwitchBanner = variants.some(v => 
-                body.includes(`Switch into ${v}`) || 
-                body.includes(`Switch to ${v}`)
-            );
-            return hasComposer && !hasSwitchBanner;
-        }""", name_variants)
-        if verified:
-            _l("success", f"🎉 Successfully verified {page_name} Page profile is active!")
-            return True
+        # 4. If Facebook reloaded to home or another page after switch, re-navigate to the target Page URL
+        curr_url = page.url or ""
+        if (target_id and target_id not in curr_url) and (fb_page_url not in curr_url):
+            _l("info", f"📄 Navigating to {page_name} Page URL ({fb_page_url}) after profile switch...")
+            await safe_goto(page, fb_page_url, timeout=45000, log_fn=_l)
+            await asyncio.sleep(3.5)
 
-        secondary_verified = await page.evaluate("""(variants) => {
+        # 5. Verification: Check if composer is now visible on page
+        await asyncio.sleep(1.5)
+        composer_ready = await page.evaluate("""() => {
             const body = document.body.innerText || '';
-            const hasManage = body.includes("Manage Page") || body.includes("Professional dashboard");
-            const hasSwitchBanner = variants.some(v => 
-                body.includes(`Switch into ${v}`) || 
-                body.includes(`Switch to ${v}`)
-            );
-            return hasManage && !hasSwitchBanner;
-        }""", name_variants)
-        if secondary_verified:
-            _l("success", f"✅ Verified: Now acting as {page_name} (Page Admin) on Facebook!")
+            return body.includes("What's on your mind") || body.includes("Create a post") || body.includes("Create post") || body.includes("Write something");
+        }""")
+        if composer_ready:
+            _l("success", f"🎉 Successfully verified {page_name} Page profile is active (composer ready)!")
             return True
 
         _l("warning", f"⚠️ Continuing with current profile state for {page_name}...")
@@ -666,7 +709,7 @@ async def _ensure_personal_profile(
     page: Page,
     log_fn: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
-    """Ensures Facebook is switched to the personal profile (Ganesh Kumar / ganeshkumard56) rather than a Page."""
+    """Ensures Facebook is switched to the personal profile (Ganeshkumar Devarasetty / Ganesh Kumar) rather than a Page."""
     def _l(lvl: str, msg: str):
         if log_fn:
             try:
@@ -675,16 +718,21 @@ async def _ensure_personal_profile(
                 pass
         _safe_print(f"[Personal Profile Switch] [{lvl.upper()}] {msg}")
 
+    personal_variants = ["Ganeshkumar Devarasetty", "Ganesh Kumar", "Ganeshkumar", "ganeshkumard56"]
     try:
         # 1. Check for on-page direct switch banner (e.g. "Switch to Ganesh Kumar")
         direct_btn = page.locator(
             'div[aria-label*="Switch into Ganesh Kumar" i], '
             'div[aria-label*="Switch to Ganesh Kumar" i], '
+            'div[aria-label*="Switch into Ganeshkumar" i], '
+            'div[aria-label*="Switch to Ganeshkumar" i], '
             'div[role="button"]:has-text("Switch into Ganesh Kumar"), '
-            'div[role="button"]:has-text("Switch to Ganesh Kumar")'
+            'div[role="button"]:has-text("Switch to Ganesh Kumar"), '
+            'div[role="button"]:has-text("Switch into Ganeshkumar"), '
+            'div[role="button"]:has-text("Switch to Ganeshkumar")'
         ).first
         if await direct_btn.count() > 0 and await direct_btn.is_visible():
-            _l("info", "🖱️ Found on-page 'Switch to Ganesh Kumar' trigger, clicking...")
+            _l("info", "🖱️ Found on-page 'Switch to Personal Profile' trigger, clicking...")
             await direct_btn.click(timeout=5000)
             await asyncio.sleep(6)
             try:
@@ -695,51 +743,76 @@ async def _ensure_personal_profile(
             return True
 
         # 2. Inspect top-right profile avatar menu
-        profile_icon = page.locator('div[aria-label="Your profile"], div[aria-label="Your Profile"]').first
+        profile_icon = page.locator(
+            'div[role="banner"] div[aria-label="Your profile"], '
+            'div[role="banner"] div[aria-label="Your Profile"], '
+            'div[role="banner"] [aria-label*="Your profile" i], '
+            'div[role="banner"] [aria-label*="Your Profile" i], '
+            '[aria-label="Your profile"][role="button"], '
+            '[aria-label="Your Profile"][role="button"]'
+        ).first
         if await profile_icon.count() > 0 and await profile_icon.is_visible():
             await profile_icon.click(timeout=5000)
             await asyncio.sleep(2)
 
-            # Evaluate opened profile menu state
-            switch_status = await page.evaluate("""() => {
-                const dialog = document.querySelector('div[role="dialog"], div[role="menu"], div[data-pagelet="root"]');
-                if (!dialog) return { isMenu: false, alreadyPersonal: false };
-                const txt = dialog.innerText || '';
-                const hasGaneshHeader = txt.includes('Ganesh Kumar') && (txt.includes('See your profile') || txt.includes('See profile'));
-                const hasSwitchToGanesh = txt.includes('Switch to Ganesh Kumar') || txt.includes('Switch into Ganesh Kumar');
+            # Evaluate opened profile menu state (strictly excluding notifications & messenger dialogs)
+            switch_status = await page.evaluate("""(variants) => {
+                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="menu"]'));
+                const menu = dialogs.find(d => {
+                    const text = (d.innerText || '').toLowerCase();
+                    const label = (d.getAttribute('aria-label') || '').toLowerCase();
+                    if (label.includes('notification') || label.includes('messenger') || label.includes('chat')) return false;
+                    return text.includes('see all profiles') || text.includes('switch profile') || text.includes('log out') || text.includes('settings & privacy') || variants.some(v => text.includes(v.toLowerCase()));
+                });
+                if (!menu) return { isMenu: false, alreadyPersonal: false, activeName: "" };
+                const lines = (menu.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                const activeName = lines[0] || '';
+                const alreadyPersonal = variants.some(v => activeName.toLowerCase().includes(v.toLowerCase()));
                 return {
                     isMenu: true,
-                    alreadyPersonal: hasGaneshHeader && !hasSwitchToGanesh,
-                    txtSnippet: txt.substring(0, 150)
+                    alreadyPersonal,
+                    activeName
                 };
-            }""")
+            }""", personal_variants)
 
             if switch_status.get("alreadyPersonal"):
-                _l("success", "✅ Already acting as personal profile (Ganesh Kumar) on Facebook.")
+                _l("success", f"✅ Already acting as personal profile ({switch_status.get('activeName')}) on Facebook.")
                 try:
                     await page.keyboard.press("Escape")
                 except Exception:
                     pass
                 return True
 
-            _l("info", "🔄 Switching from Page identity back to Personal Profile (Ganesh Kumar)...")
+            _l("info", f"🔄 Switching from '{switch_status.get('activeName')}' to Personal Profile (Ganesh Kumar)...")
 
             # Check for direct switch tile in menu
-            personal_tile = page.locator(
-                'div[role="dialog"] div[role="button"]:has-text("Ganesh Kumar"), '
-                'div[role="dialog"] div[role="listitem"]:has-text("Ganesh Kumar"), '
-                'div[role="dialog"] [aria-label*="Ganesh Kumar" i], '
-                'div[role="menu"] div[role="button"]:has-text("Ganesh Kumar"), '
-                'div[role="menu"] [aria-label*="Ganesh Kumar" i]'
-            ).first
-
             switched = False
-            if await personal_tile.count() > 0 and await personal_tile.is_visible():
-                _l("info", "🖱️ Selected Ganesh Kumar switch tile from profile menu...")
-                await personal_tile.click(timeout=5000)
-                switched = True
-                await asyncio.sleep(6)
-            else:
+            for v in personal_variants:
+                personal_tile = page.locator(
+                    f'div[role="dialog"] div[role="button"]:has-text("{v}"), '
+                    f'div[role="dialog"] div[role="listitem"]:has-text("{v}"), '
+                    f'div[role="dialog"] [aria-label*="{v}" i], '
+                    f'div[role="menu"] div[role="button"]:has-text("{v}"), '
+                    f'div[role="menu"] [aria-label*="{v}" i]'
+                ).first
+                if await personal_tile.count() > 0 and await personal_tile.is_visible():
+                    _l("info", f"🖱️ Selected {v} switch tile from profile menu...")
+                    try:
+                        await personal_tile.click(timeout=5000)
+                    except Exception:
+                        await page.evaluate("""(name) => {
+                            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="menu"]'));
+                            for (const d of dialogs) {
+                                const items = Array.from(d.querySelectorAll('div[role="button"], div[role="listitem"]'));
+                                const m = items.find(el => (el.innerText || '').toLowerCase().includes(name.toLowerCase()));
+                                if (m) { m.click(); return; }
+                            }
+                        }""", v)
+                    switched = True
+                    await asyncio.sleep(6)
+                    break
+
+            if not switched:
                 see_all = page.locator(
                     'div[role="button"]:has-text("See all profiles"), '
                     'span:has-text("See all profiles"), '
@@ -747,18 +820,39 @@ async def _ensure_personal_profile(
                 ).first
                 if await see_all.count() > 0 and await see_all.is_visible():
                     _l("info", "🖱️ Clicking 'See all profiles' in menu...")
-                    await see_all.click(timeout=4000)
-                    await asyncio.sleep(2)
-                    personal_tile2 = page.locator(
-                        'div[role="button"]:has-text("Ganesh Kumar"), '
-                        'div[role="listitem"]:has-text("Ganesh Kumar"), '
-                        '[aria-label*="Ganesh Kumar" i]'
-                    ).first
-                    if await personal_tile2.count() > 0 and await personal_tile2.is_visible():
-                        _l("info", "🖱️ Selected Ganesh Kumar from all profiles list...")
-                        await personal_tile2.click(timeout=5000)
-                        switched = True
-                        await asyncio.sleep(6)
+                    try:
+                        await see_all.click(timeout=4000)
+                    except Exception:
+                        await page.evaluate("""() => {
+                            const b = Array.from(document.querySelectorAll('div[role="button"], span')).find(el => (el.innerText || '').trim() === 'See all profiles');
+                            if (b) b.click();
+                        }""")
+                    await asyncio.sleep(2.5)
+
+                    for v in personal_variants:
+                        personal_tile2 = page.locator(
+                            f'div[role="dialog"] div[role="button"]:has-text("{v}"), '
+                            f'div[role="dialog"] div[role="listitem"]:has-text("{v}"), '
+                            f'div[role="dialog"] [aria-label*="{v}" i], '
+                            f'div[role="menu"] div[role="button"]:has-text("{v}"), '
+                            f'div[role="menu"] [aria-label*="{v}" i]'
+                        ).first
+                        if await personal_tile2.count() > 0 and await personal_tile2.is_visible():
+                            _l("info", f"🖱️ Selected {v} from all profiles list...")
+                            try:
+                                await personal_tile2.click(timeout=5000)
+                            except Exception:
+                                await page.evaluate("""(name) => {
+                                    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], div[role="menu"]'));
+                                    for (const d of dialogs) {
+                                        const items = Array.from(d.querySelectorAll('div[role="button"], div[role="listitem"]'));
+                                        const m = items.find(el => (el.innerText || '').toLowerCase().includes(name.toLowerCase()));
+                                        if (m) { m.click(); return; }
+                                    }
+                                }""", v)
+                            switched = True
+                            await asyncio.sleep(6)
+                            break
 
             try:
                 await page.keyboard.press("Escape")
@@ -766,7 +860,7 @@ async def _ensure_personal_profile(
                 pass
 
             if switched:
-                _l("success", "🎉 Successfully switched to Personal Profile (Ganesh Kumar)!")
+                _l("success", "🎉 Successfully switched to Personal Profile!")
                 return True
 
             return False
@@ -812,34 +906,83 @@ async def _publish_to_facebook_page(
     except Exception:
         pass
 
-    # Scroll down so composer is centered in viewport
-    await page.evaluate("window.scrollBy(0, 350)")
-    await asyncio.sleep(1.5)
-
     # Locate and trigger composer: "What's on your mind?", "Create a post", or "Write something..."
     _l("info", f"📝 Opening post composer on {page_name} Page...")
     composer_selector = (
-        'div[role="button"]:has-text("What\'s on your mind?"), '
-        'span:has-text("What\'s on your mind?"), '
+        'div[role="button"]:has-text("What\'s on your mind"), '
+        'span:has-text("What\'s on your mind"), '
         'div[role="button"]:has-text("Create a post"), '
         'span:has-text("Create a post"), '
-        'div[role="button"]:has-text("Write something..."), '
-        'span:has-text("Write something...")'
+        'div[role="button"]:has-text("Create post"), '
+        'span:has-text("Create post"), '
+        'div[role="button"]:has-text("Write something"), '
+        'span:has-text("Write something")'
     )
-    composer_trigger = page.locator(composer_selector).first
 
-    composer_found = False
-    for attempt in range(3):
-        if await composer_trigger.count() > 0 and await composer_trigger.is_visible():
-            composer_found = True
+    async def _try_click_page_composer() -> bool:
+        # First evaluate visible element click in JS
+        clicked = await page.evaluate("""() => {
+            const elements = Array.from(document.querySelectorAll('div[role="button"], span, div[tabindex="0"]'));
+            const el = elements.find(e => {
+                if (e.offsetParent === null) return false;
+                const t = (e.innerText || '').trim();
+                return t.includes("What's on your mind") || t.includes("Create a post") || t.includes("Create post") || t.includes("Write something");
+            });
+            if (el) {
+                const btn = el.closest('div[role="button"]') || el;
+                btn.scrollIntoView({ block: 'center', behavior: 'instant' });
+                btn.click();
+                return true;
+            }
+            return false;
+        }""")
+        if clicked:
+            return True
+
+        # Locator fallback
+        loc = page.locator(composer_selector)
+        count = await loc.count()
+        for idx in range(count):
+            item = loc.nth(idx)
+            if await item.is_visible():
+                try:
+                    await item.scroll_into_view_if_needed()
+                    await item.click(timeout=3000, force=True)
+                    return True
+                except Exception:
+                    pass
+        return False
+
+    composer_opened = False
+    dialog_loc = page.locator(
+        'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]), '
+        'div[role="dialog"]:has-text("Create post"), '
+        'div[role="dialog"]:has-text("Post settings")'
+    ).first
+
+    for attempt in range(5):
+        if await dialog_loc.count() > 0 and await dialog_loc.is_visible():
+            composer_opened = True
             break
-        await page.evaluate("window.scrollBy(0, 350)")
-        await asyncio.sleep(1.5)
+        clicked = await _try_click_page_composer()
+        if clicked:
+            await asyncio.sleep(2.5)
+            if await dialog_loc.count() > 0 and await dialog_loc.is_visible():
+                composer_opened = True
+                break
+        if attempt == 0:
+            await page.evaluate("window.scrollTo(0, 0)")
+        elif attempt == 1:
+            await page.evaluate("window.scrollBy(0, 300)")
+        elif attempt == 2:
+            _l("info", f"🔄 Composer not detected, ensuring profile switch to {page_name}...")
+            await _ensure_facebook_page_profile(page, fb_page_url=page_url, page_name=page_name, log_fn=_l)
+        await asyncio.sleep(2)
 
-    if not composer_found:
+    if not composer_opened:
         try:
-            await composer_trigger.wait_for(state="visible", timeout=8000)
-            composer_found = True
+            await dialog_loc.wait_for(state="visible", timeout=6000)
+            composer_opened = True
         except Exception:
             debug_path = os.path.join(DESTINATIONS_DIR, channel_key, "screenshots", "debug_composer_missing.png")
             try:
@@ -849,24 +992,6 @@ async def _publish_to_facebook_page(
             except Exception:
                 pass
             raise RuntimeError(f"Could not find post composer on {page_name} Page.")
-
-    try:
-        await composer_trigger.click(timeout=4000, force=True)
-    except Exception:
-        await page.evaluate("""() => {
-            const el = Array.from(document.querySelectorAll('div[role="button"], span')).find(e => {
-                const t = (e.innerText || '');
-                return t.includes("What's on your mind?") || t.includes("Create a post") || t.includes("Write something...");
-            });
-            if (el) el.click();
-        }""")
-    await asyncio.sleep(3)
-
-    dialog_loc = page.locator(
-        'div[role="dialog"]:has(div[role="textbox"][contenteditable="true"]), '
-        'div[role="dialog"]:has-text("Create post"), '
-        'div[role="dialog"]:has-text("Post settings")'
-    ).first
     await dialog_loc.wait_for(state="visible", timeout=12000)
 
     textbox = page.locator(
@@ -890,10 +1015,6 @@ async def _publish_to_facebook_page(
     _l("info", f"⌨️ Typing deal copy for Pin {pin_id} into {page_name} composer...")
     await page.keyboard.type(clean_text, delay=14)
     await asyncio.sleep(1)
-    try:
-        await page.keyboard.press("Escape")
-    except Exception:
-        pass
 
     # Attach Verified Image
     attached_image_verified = False
@@ -977,17 +1098,16 @@ async def _publish_to_facebook_page(
         else:
             break
 
-    # Click Post button
+    # Click Post button with robust upload-wait loop
     _l("info", f"🚀 Publishing Pin {pin_id} to {page_name} Facebook Page feed...")
     clicked_post = False
-    for attempt in range(6):
+    for attempt in range(25):
         # Also check and dismiss any lingering "Not now" modal
         await page.evaluate("""() => {
             const btns = Array.from(document.querySelectorAll('div[role="button"], button'));
             const notNow = btns.find(b => (b.innerText || '').trim() === 'Not now' || b.getAttribute('aria-label') === 'Not now');
             if (notNow) notNow.click();
         }""")
-        await asyncio.sleep(1)
 
         clicked_post = await page.evaluate("""() => {
             const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
@@ -1004,25 +1124,56 @@ async def _publish_to_facebook_page(
         if clicked_post:
             _l("success", f"🖱️ Clicked 'Post' button successfully on attempt {attempt + 1}!")
             break
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
 
     if not clicked_post:
-        post_loc = page.locator('div[role="dialog"]:has-text("Post settings") div[role="button"]:has-text("Post"), div[role="dialog"]:has-text("Create post") div[role="button"]:has-text("Post"), [role="button"]:has-text("Post")').first
-        if await post_loc.count() > 0:
-            await post_loc.click(timeout=4000, force=True)
+        try:
+            post_loc = page.locator('div[role="dialog"]:has-text("Post settings") div[role="button"]:has-text("Post"), div[role="dialog"]:has-text("Create post") div[role="button"]:has-text("Post"), [role="button"]:has-text("Post")').first
+            if await post_loc.count() > 0:
+                await post_loc.click(timeout=5000, force=True)
+                clicked_post = True
+        except Exception as e_pclk:
+            _l("warning", f"Page post button click note: {e_pclk}")
 
     _l("info", f"⏳ Awaiting post publication confirmation on {page_name}...")
-    # Handle any post-publication popup like "Boost post"
+    # Handle any post-publication popups (e.g. "Boost post", "Enter phone number", "Not now", "Add a button")
     for _ in range(8):
         await asyncio.sleep(1.5)
-        boost_dismissed = await page.evaluate("""() => {
-            const btns = Array.from(document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button'));
-            const notNow = btns.find(b => (b.innerText || '').trim() === 'Not now' || b.getAttribute('aria-label') === 'Close');
-            if (notNow) { notNow.click(); return true; }
+        dismissed = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const d of dialogs) {
+                const text = (d.innerText || '').toLowerCase();
+                const btns = Array.from(d.querySelectorAll('div[role="button"], button'));
+                
+                // 1. Look for standard dismiss / close / cancel buttons
+                const dismissBtn = btns.find(b => {
+                    const label = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
+                    return label === 'not now' || label === 'close' || label === 'cancel' || label === 'skip' || label.includes('not now');
+                });
+                if (dismissBtn) {
+                    dismissBtn.click();
+                    return true;
+                }
+                
+                // 2. Close button by aria-label
+                const closeIcon = d.querySelector('[aria-label="Close"], [aria-label="close"]');
+                if (closeIcon) {
+                    closeIcon.click();
+                    return true;
+                }
+            }
             return false;
         }""")
-        if boost_dismissed:
-            _l("info", "🖱️ Dismissed post-publish dialog ('Not now')...")
+        if dismissed:
+            _l("info", "🖱️ Dismissed post-publish dialog ('Not now' / Close)...")
+        else:
+            try:
+                # If an unsolicited prompt like "Enter phone number" or "Boost" is still blocking, press Escape
+                has_dialog = await page.locator('div[role="dialog"]').count()
+                if has_dialog > 0:
+                    await page.keyboard.press("Escape")
+            except Exception:
+                pass
 
     try:
         await page.locator('div[role="dialog"]:has-text("Create post"), div[role="dialog"]:has-text("Post settings")').first.wait_for(state="hidden", timeout=12000)
@@ -1132,21 +1283,33 @@ async def _publish_to_facebook_profile(
     await asyncio.sleep(2)
 
     _l("info", "🚀 Publishing deal to Facebook Main feed...")
-    clicked_post = await page.evaluate("""() => {
-        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-        for (const dialog of dialogs) {
-            const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-            const postBtn = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
-            if (postBtn && postBtn.getAttribute('aria-disabled') !== 'true') {
-                postBtn.click();
-                return true;
+    clicked_post = False
+    for attempt in range(25):
+        clicked_post = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const dialog of dialogs) {
+                const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
+                const postBtn = btns.find(b => (b.innerText || '').trim() === 'Post' || b.getAttribute('aria-label') === 'Post');
+                if (postBtn && postBtn.getAttribute('aria-disabled') !== 'true') {
+                    postBtn.click();
+                    return true;
+                }
             }
-        }
-        return false;
-    }""")
+            return false;
+        }""")
+        if clicked_post:
+            _l("success", f"🖱️ Clicked 'Post' button successfully on attempt {attempt + 1}!")
+            break
+        await asyncio.sleep(1.2)
+
     if not clicked_post:
-        post_loc = page.locator('div[role="dialog"] div[role="button"]:has-text("Post"), div[role="dialog"] button:has-text("Post")').first
-        await post_loc.click(timeout=6000, force=True)
+        try:
+            post_loc = page.locator('div[role="dialog"] div[role="button"]:has-text("Post"), div[role="dialog"] button:has-text("Post")').first
+            if await post_loc.count() > 0:
+                await post_loc.click(timeout=5000, force=True)
+                clicked_post = True
+        except Exception as e_pmain:
+            _l("warning", f"Profile post button click note: {e_pmain}")
 
     _l("info", "⏳ Awaiting post publication confirmation on Personal Profile...")
     await asyncio.sleep(8)
@@ -1476,11 +1639,10 @@ async def _publish_to_facebook_group(
             const triggers = Array.from(document.querySelectorAll('div[role="button"], span, div[tabindex="0"]'));
             const trigger = triggers.find(t => {
                 const txt = (t.innerText || '').trim();
-                return txt === 'Write something...' || 
-                       txt.startsWith('Write something') || 
+                return txt.includes('Write something') || 
                        txt.includes('Create a public post') || 
                        txt.includes('Create a post') || 
-                       txt.includes("What's on your mind?");
+                       txt.includes("What's on your mind");
             });
             if (trigger) {
                 trigger.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -1530,11 +1692,6 @@ async def _publish_to_facebook_group(
     _l("info", f"⌨️ Typing deal copy for Pin {pin_id} into {FB_GROUP_NAME}...")
     await page.keyboard.type(clean_text, delay=12)
     await asyncio.sleep(1)
-    # Dismiss any hashtag autocomplete dropdown
-    try:
-        await page.keyboard.press("Escape")
-    except Exception:
-        pass
 
     # ──────────────────────────────────────────
     # CHECKPOINT: Attach Verified Image to Group Post
@@ -1561,7 +1718,7 @@ async def _publish_to_facebook_group(
                 await file_input.set_input_files(image_path)
                 _l("info", f"⏳ Image file injected into {FB_GROUP_NAME} composer. Awaiting photo preview hydration...")
 
-                for _ in range(10):
+                for _ in range(12):
                     preview_img = dialog_loc.locator(
                         'img[src*="blob:"], '
                         'div[aria-label*="Media" i] img, '
@@ -1587,43 +1744,42 @@ async def _publish_to_facebook_group(
     await _take_screenshot(page, f"fb_group_checkpoint_verified_pin_{pin_id}.png", live_frame_fn=live_frame_fn)
     await asyncio.sleep(2)
 
-    # Wait for enabled Post button inside dialog
-    for _ in range(10):
-        is_disabled = await page.evaluate("""() => {
-            const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
-                           document.querySelector('div[role="dialog"]');
-            if (!dialog) return true;
-            const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-            const p = btns.find(b => {
-                const t = (b.innerText || '').trim();
-                const a = b.getAttribute('aria-label') || '';
-                return t === 'Post' || t === 'Share' || a === 'Post' || a === 'Share';
-            });
-            return !p || p.getAttribute('aria-disabled') === 'true';
+    # Click Post button with robust upload-wait loop
+    _l("info", f"🚀 Publishing deal to {FB_GROUP_NAME}...")
+    clicked = False
+    for attempt in range(25):
+        # 1. Evaluate click across open dialogs
+        clicked = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const dialog of dialogs) {
+                const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
+                const p = btns.find(b => {
+                    const t = (b.innerText || '').trim();
+                    const a = b.getAttribute('aria-label') || '';
+                    return (t === 'Post' || t === 'Share' || a === 'Post' || a === 'Share');
+                });
+                if (p && p.getAttribute('aria-disabled') !== 'true') {
+                    p.click();
+                    return true;
+                }
+            }
+            return false;
         }""")
-        if not is_disabled:
+        if clicked:
+            _l("success", f"🖱️ Clicked 'Post' button successfully on attempt {attempt + 1}!")
             break
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.2)
 
-    _l("info", f"🖱️ Publishing deal to {FB_GROUP_NAME}...")
-    clicked = await page.evaluate("""() => {
-        const dialog = document.querySelector('div[role="dialog"]:has(div[role="textbox"][contenteditable="true"])') ||
-                       document.querySelector('div[role="dialog"]');
-        if (!dialog) return false;
-        const btns = Array.from(dialog.querySelectorAll('div[role="button"], button'));
-        const p = btns.find(b => {
-            const t = (b.innerText || '').trim();
-            const a = b.getAttribute('aria-label') || '';
-            return t === 'Post' || t === 'Share' || a === 'Post' || a === 'Share';
-        });
-        if (p && p.getAttribute('aria-disabled') !== 'true') { p.click(); return true; }
-        return false;
-    }""")
     if not clicked:
         post_btn_loc = dialog_loc.locator(
             '[role="button"]:has-text("Post"), button:has-text("Post"), [aria-label="Post"], [role="button"]:has-text("Share"), button:has-text("Share")'
         ).first
-        await post_btn_loc.click(timeout=6000, force=True)
+        if await post_btn_loc.count() > 0:
+            try:
+                await post_btn_loc.click(timeout=5000, force=True)
+                clicked = True
+            except Exception as e_clk:
+                _l("warning", f"Playwright locator click note: {e_clk}")
 
     _l("info", f"⏳ Awaiting post processing and publication in {FB_GROUP_NAME}...")
     try:
@@ -1634,6 +1790,24 @@ async def _publish_to_facebook_group(
         _l("success", f"✅ Composer modal detached — post accepted by {FB_GROUP_NAME}!")
     except Exception:
         await asyncio.sleep(4)
+
+    # Dismiss any post-publication prompt dialogs
+    for _ in range(5):
+        await asyncio.sleep(1)
+        dismissed = await page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+            for (const d of dialogs) {
+                const btns = Array.from(d.querySelectorAll('div[role="button"], button'));
+                const dismissBtn = btns.find(b => {
+                    const label = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
+                    return label === 'not now' || label === 'close' || label === 'cancel' || label === 'done';
+                });
+                if (dismissBtn) { dismissBtn.click(); return true; }
+            }
+            return false;
+        }""")
+        if not dismissed:
+            break
 
     await asyncio.sleep(2)
     verified_path = await _take_screenshot(page, f"verified_fb_group_pin_{pin_id}.png", live_frame_fn=live_frame_fn)
@@ -1792,14 +1966,16 @@ async def execute_pinterest_facebook_share(
             if n and n not in target_channels:
                 target_channels.append(n)
     else:
-        if destination == "both":
+        if destination in ["all", "all_channels", "all_6", "six", "6"]:
+            target_channels = ["Facebook_Main", "WorldNewzs", "LatestNews", "ProductInsta", "ProductThreads", "Facebook_Group"]
+        elif destination == "both":
             target_channels = ["WorldNewzs", "Facebook_Group"]
         elif destination == "page":
             target_channels = ["WorldNewzs"]
         elif destination == "group":
             target_channels = ["Facebook_Group"]
         else:
-            target_channels = ["WorldNewzs", "Facebook_Group"]
+            target_channels = ["Facebook_Main", "WorldNewzs", "LatestNews", "ProductInsta", "ProductThreads", "Facebook_Group"]
 
     if not target_channels:
         target_channels = ["WorldNewzs"]

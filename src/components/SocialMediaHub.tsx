@@ -502,7 +502,7 @@ export const SocialMediaHub: React.FC<SocialMediaHubProps> = () => {
       ? Math.max(1, pendingCount)
       : fbSharePinCount;
 
-    const effectiveDestinations = selectedChannels.length > 0 ? selectedChannels : ['facebook_main', 'worldnewzs', 'latestnews', 'product_insta', 'product_threads'];
+    const effectiveDestinations = selectedChannels.length > 0 ? selectedChannels : ['facebook_main', 'worldnewzs', 'latestnews', 'product_insta', 'product_threads', 'facebook_group'];
     const destLabel = effectiveDestinations
       .map((k) => CHANNEL_CONFIGS.find((c) => c.key === k)?.name || k)
       .join(', ');

@@ -35,14 +35,16 @@ def sync_live_products() -> Dict[str, Any]:
             )
             with urllib.request.urlopen(req, timeout=60) as res:
                 live_data = json.loads(res.read().decode("utf-8"))
-                live_prods = live_data.get("products") if isinstance(live_data, dict) else live_data
-                if isinstance(live_prods, list) and len(live_prods) > 0:
+                prods_candidate = live_data.get("products") if isinstance(live_data, dict) else live_data
+                if isinstance(prods_candidate, list) and len(prods_candidate) > 0:
+                    live_prods = prods_candidate
                     break
         except Exception as e:
             print(f"[Scraper] WorldNewzs direct API attempt {attempt+1} note: {e}")
             import time
             time.sleep(3)
 
+    if live_prods and isinstance(live_prods, list) and len(live_prods) > 0:
         # Sanitize images and compute accurate discounts
         for p in live_prods:
             asin = str(p.get("asin") or "").strip()
@@ -60,8 +62,8 @@ def sync_live_products() -> Dict[str, Any]:
             os.makedirs(os.path.dirname(LOCAL_DATASET_PATH), exist_ok=True)
             with open(LOCAL_DATASET_PATH, "w", encoding="utf-8") as f:
                 json.dump({"products": live_prods}, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
+        except OSError as oe:
+            print(f"[Scraper] Warning: Failed to write {LOCAL_DATASET_PATH}: {oe}")
 
         _cached_products = live_prods
         print(f"[Scraper] Successfully synced {len(_cached_products)} products from WorldNewzs.")

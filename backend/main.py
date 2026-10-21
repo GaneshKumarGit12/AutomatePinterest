@@ -119,6 +119,17 @@ async def add_private_network_access_headers(request: Request, call_next):
     return response
 
 
+@app.on_event("startup")
+async def on_startup():
+    """Runs a non-blocking background task to sync live products from WorldNewzs on server startup."""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, sync_live_products)
+    except Exception as e:
+        print(f"[Startup] Live sync scheduled error: {e}")
+
+
 # Global State
 STATE_FILE_PATH = (
     "/tmp/last_run_state.json"

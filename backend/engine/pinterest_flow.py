@@ -468,17 +468,18 @@ async def execute_11_step_pipeline(
             async def select_and_save_to_existing_board():
                 nonlocal selected_existing_board_name
                 search_input = '#pickerSearchField, input[placeholder*="Search" i], [data-test-id="board-search-input"]'
+                board_sel = '[data-test-id="pin-to-board-content"] div[role="button"], [data-test-id="board-selection"] div[role="button"], div[role="listbox"] div[role="button"]'
 
-                for attempt in range(3):
+                for attempt in range(4):
                     try:
                         await pin_tab.wait_for_selector(
-                            '[data-test-id="board-selection"] div[role="button"]',
+                            board_sel,
                             timeout=12000,
                         )
                     except Exception:
                         pass
 
-                    row_count = await pin_tab.locator('[data-test-id="board-selection"] div[role="button"]').count()
+                    row_count = await pin_tab.locator(board_sel).count()
                     if row_count > 0:
                         break
 
@@ -490,7 +491,7 @@ async def execute_11_step_pipeline(
                             if val:
                                 await s_el.fill("")
                                 await asyncio.sleep(2.0)
-                                if await pin_tab.locator('[data-test-id="board-selection"] div[role="button"]').count() > 0:
+                                if await pin_tab.locator(board_sel).count() > 0:
                                     break
                         if attempt < 2:
                             print(f"[Pinterest Flow] Reloading Pin Builder board list (attempt {attempt + 1})...")
@@ -500,25 +501,26 @@ async def execute_11_step_pipeline(
                         pass
 
                 card_idx_num = int(deal.get("cardIndex", 0))
-                board_info = await pin_tab.evaluate("""(cardIdx) => {
-                    const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
+                board_info = await pin_tab.evaluate("""({ cardIdx, sel }) => {
+                    const rows = Array.from(document.querySelectorAll(sel));
                     if (!rows.length) return null;
-                    const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
-                    const pool = (collabRows.length > 0 ? collabRows : rows).slice(0, 3);
+                    const pool = rows.slice(0, 5);
                     const target = pool[cardIdx % pool.length] || rows[0];
                     const rect = target.getBoundingClientRect();
                     const name = (target.innerText || '').split('\\n')[0].trim();
                     return {
                         name,
+                        index: rows.indexOf(target),
                         x: rect.left + rect.width / 2,
                         y: rect.top + rect.height / 2
                     };
-                }""", card_idx_num)
+                }""", {"cardIdx": card_idx_num, "sel": board_sel})
 
                 if board_info:
                     selected_existing_board_name = board_info.get("name") or "Existing Collaborative Board"
                     cx, cy = board_info["x"], board_info["y"]
-                    print(f"[Pinterest Flow] Saving Pin to existing collaborative board: '{selected_existing_board_name}'...")
+                    b_idx = board_info["index"]
+                    print(f"[Pinterest Flow] Saving Pin to existing collaborative board #{b_idx}: '{selected_existing_board_name}'...")
                     await install_visual_cursor(pin_tab)
                     await pin_tab.mouse.move(cx, cy, steps=15)
                     await pin_tab.evaluate(
@@ -528,14 +530,16 @@ async def execute_11_step_pipeline(
                     await pin_tab.evaluate(
                         f"window.__triggerClickPulse && window.__triggerClickPulse({cx}, {cy});"
                     )
-                    await pin_tab.evaluate("""(cardIdx) => {
-                        const rows = Array.from(document.querySelectorAll('[data-test-id="board-selection"] div[role="button"]'));
-                        const collabRows = rows.filter(r => r.querySelector('[data-test-id="board-picker-row-icon-list-box"]'));
-                        const pool = (collabRows.length > 0 ? collabRows : rows).slice(0, 3);
-                        const target = pool[cardIdx % pool.length] || rows[0];
-                        if (target) target.click();
-                    }""", card_idx_num)
-                    await asyncio.sleep(2.0)
+                    try:
+                        target_loc = pin_tab.locator(board_sel).nth(b_idx)
+                        await target_loc.scroll_into_view_if_needed()
+                        await target_loc.click(timeout=6000, force=True)
+                    except Exception:
+                        await pin_tab.evaluate("""({ idx, sel }) => {
+                            const rows = Array.from(document.querySelectorAll(sel));
+                            if (rows[idx]) rows[idx].click();
+                        }""", {"idx": b_idx, "sel": board_sel})
+                    await asyncio.sleep(2.5)
                     return True
                 return False
 
@@ -819,7 +823,7 @@ async def execute_11_step_pipeline(
                             return true;
                         }
 
-                        if (bodyText.includes('saved to') || bodyText.includes('you saved this pin') || bodyText.includes('1 pin') || bodyText.includes('see it now')) {
+                        if (bodyText.includes('saved to') || bodyText.includes('you saved this pin') || bodyText.includes('see it now')) {
                             return true;
                         }
 
